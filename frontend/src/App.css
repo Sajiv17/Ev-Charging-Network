@@ -1,0 +1,67 @@
+.App {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+.App-header {
+  text-align: center;
+  max-width: 900px;
+}
+
+.App-header h1 {
+  font-size: 3rem;
+  color: #1A4FFF;
+  margin-bottom: 12px;
+}
+
+.App-header > p {
+  font-size: 1.2rem;
+  color: #5A6285;
+  margin-bottom: 40px;
+}
+
+.status-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 16px;
+  margin-bottom: 40px;
+}
+
+.status-card {
+  background: white;
+  border: 1px solid #D8DFFF;
+  border-radius: 12px;
+  padding: 24px;
+  text-align: center;
+}
+
+.status-card h3 {
+  font-size: 1rem;
+  color: #0C1230;
+  margin-bottom: 12px;
+}
+
+.status-badge {
+  display: inline-block;
+  padding: 6px 14px;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  background: #EDF1FF;
+  color: #5A6285;
+}
+
+.status-badge.running {
+  background: #E6F9F2;
+  color: #00B87A;
+}
+
+.info {
+  font-size: 0.95rem;
+  color: #9299B8;
+  margin-top: 20px;
+}

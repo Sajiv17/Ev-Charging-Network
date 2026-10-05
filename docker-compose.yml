@@ -1,0 +1,180 @@
+version: '3.8'
+
+services:
+  # ========== MySQL City Nodes ==========
+
+  mysql-bangalore:
+    image: mysql:8.0
+    container_name: ev-mysql-bangalore
+    environment:
+      MYSQL_ROOT_PASSWORD: evcharge_root_2024
+      MYSQL_DATABASE: ev_bangalore
+      MYSQL_USER: ev_user
+      MYSQL_PASSWORD: evcharge_pass_2024
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_bangalore_data:/var/lib/mysql
+      - ./database/mysql/schema:/docker-entrypoint-initdb.d
+    networks:
+      - ev-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-pevcharge_root_2024"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mysql-chennai:
+    image: mysql:8.0
+    container_name: ev-mysql-chennai
+    environment:
+      MYSQL_ROOT_PASSWORD: evcharge_root_2024
+      MYSQL_DATABASE: ev_chennai
+      MYSQL_USER: ev_user
+      MYSQL_PASSWORD: evcharge_pass_2024
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql_chennai_data:/var/lib/mysql
+      - ./database/mysql/schema:/docker-entrypoint-initdb.d
+    networks:
+      - ev-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-pevcharge_root_2024"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mysql-delhi:
+    image: mysql:8.0
+    container_name: ev-mysql-delhi
+    environment:
+      MYSQL_ROOT_PASSWORD: evcharge_root_2024
+      MYSQL_DATABASE: ev_delhi
+      MYSQL_USER: ev_user
+      MYSQL_PASSWORD: evcharge_pass_2024
+    ports:
+      - "3308:3306"
+    volumes:
+      - mysql_delhi_data:/var/lib/mysql
+      - ./database/mysql/schema:/docker-entrypoint-initdb.d
+    networks:
+      - ev-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-pevcharge_root_2024"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ========== MongoDB ==========
+
+  mongodb:
+    image: mongo:6.0
+    container_name: ev-mongodb
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ev_admin
+      MONGO_INITDB_ROOT_PASSWORD: evcharge_mongo_2024
+      MONGO_INITDB_DATABASE: ev_realtime
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+      - ./database/mongodb/seeds:/docker-entrypoint-initdb.d
+    networks:
+      - ev-network
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ========== Backend API ==========
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ev-backend
+    environment:
+      # MySQL connections
+      MYSQL_BANGALORE_HOST: mysql-bangalore
+      MYSQL_BANGALORE_PORT: 3306
+      MYSQL_BANGALORE_USER: ev_user
+      MYSQL_BANGALORE_PASSWORD: evcharge_pass_2024
+      MYSQL_BANGALORE_DB: ev_bangalore
+
+      MYSQL_CHENNAI_HOST: mysql-chennai
+      MYSQL_CHENNAI_PORT: 3306
+      MYSQL_CHENNAI_USER: ev_user
+      MYSQL_CHENNAI_PASSWORD: evcharge_pass_2024
+      MYSQL_CHENNAI_DB: ev_chennai
+
+      MYSQL_DELHI_HOST: mysql-delhi
+      MYSQL_DELHI_PORT: 3306
+      MYSQL_DELHI_USER: ev_user
+      MYSQL_DELHI_PASSWORD: evcharge_pass_2024
+      MYSQL_DELHI_DB: ev_delhi
+
+      # MongoDB connection
+      MONGODB_HOST: mongodb
+      MONGODB_PORT: 27017
+      MONGODB_USER: ev_admin
+      MONGODB_PASSWORD: evcharge_mongo_2024
+      MONGODB_DB: ev_realtime
+
+      # API config
+      API_HOST: 0.0.0.0
+      API_PORT: 8000
+      DEBUG: "true"
+      SECRET_KEY: "your-secret-key-change-in-production"
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+    depends_on:
+      mysql-bangalore:
+        condition: service_healthy
+      mysql-chennai:
+        condition: service_healthy
+      mysql-delhi:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+    networks:
+      - ev-network
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # ========== Frontend ==========
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: ev-frontend
+    environment:
+      REACT_APP_API_URL: http://localhost:8000
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    depends_on:
+      - backend
+    networks:
+      - ev-network
+    stdin_open: true
+    tty: true
+
+# ========== Networks ==========
+
+networks:
+  ev-network:
+    driver: bridge
+
+# ========== Volumes ==========
+
+volumes:
+  mysql_bangalore_data:
+  mysql_chennai_data:
+  mysql_delhi_data:
+  mongodb_data:
