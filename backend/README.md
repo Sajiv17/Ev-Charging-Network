@@ -1,210 +1,101 @@
-# Backend — Person 2 (Backend + Transactions)
+# Backend: Person 2 (Backend + Transactions)
 
-## Your Responsibility
+FastAPI service that sits between the React frontend and the 3 MySQL city nodes + MongoDB.
+API reference for the frontend: [`docs/API.md`](../docs/API.md).
+Concurrency write-up: [`docs/CONCURRENCY.md`](../docs/CONCURRENCY.md).
 
-Build the FastAPI backend with all REST endpoints and implement concurrency control (2PL, deadlock handling).
+## Status
 
----
+| Part | Status |
+|------|--------|
+| Users, login (JWT), wallet top-up, vehicles | Done |
+| Station search, station detail, slots with price estimate | Done |
+| Booking transaction with strict 2PL + deadlock retry | Done |
+| Cancel booking + refund | Done |
+| Concurrency demo (double booking + lost update) | Done |
+| Live transaction audit log | Done (in-memory + MongoDB `audit_log`) |
+| Cross-city booking with XA two-phase commit | Phase 2 |
+| Crash/recovery demo | Phase 2 |
+| Charging sessions (start / end with kWh billing), fault refunds to wallet | Phase 2 |
+| Deadlock demo | Phase 2 |
 
-## What You Build
+## Folder layout
 
-### 📁 `app/api/`
-**Empty — you create these**
-
-Create one router file per resource:
-
-**Tasks:**
-- `users.py` — user registration, login, wallet management
-- `stations.py` — search stations by city/location, get station details
-- `bookings.py` — **MOST IMPORTANT** — create booking with 2PL, get user bookings, cancel booking
-- `payments.py` — process payment, get payment history, refund status
-- `chargers.py` — get charger status (read from MongoDB via Person 3's code)
-
-**Example structure for `bookings.py`:**
-```python
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
-from app.db.mysql_connection import get_city_session
-from app.services.booking_service import create_booking_with_lock
-
-router = APIRouter()
-
-@router.post("/bookings")
-def create_booking(user_id: int, slot_id: int, city: str):
-    db = get_city_session(city)
-    try:
-        booking = create_booking_with_lock(db, user_id, slot_id)
-        return {"booking_id": booking.booking_id, "status": "confirmed"}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+```
+backend/
+├── app/
+│   ├── main.py              app, routers, error handling, /health
+│   ├── core/
+│   │   ├── config.py        settings from environment variables
+│   │   ├── cities.py        city <-> node registry
+│   │   └── security.py      password hashing, JWT
+│   ├── db/                  one SQLAlchemy engine per city node, MongoDB client
+│   ├── models/              SQLAlchemy models (one per table)
+│   ├── schemas/             Pydantic request/response shapes
+│   ├── api/                 HTTP routes (thin: validate, call a service)
+│   └── services/            all business logic and SQL
+│       ├── booking_service.py   <- the 2PL booking transaction
+│       ├── user_service.py
+│       ├── station_service.py
+│       ├── pricing.py
+│       ├── replication.py   writes to replicated tables on all nodes
+│       ├── audit.py         live transaction log
+│       └── demo_service.py
+├── scripts/seed_demo_data.py    test data for all 3 nodes
+└── demo/concurrency_demo.py     the live concurrency demo
 ```
 
-### 📁 `app/models/`
-**Empty — you create these**
+## Data placement (agreed design)
 
-SQLAlchemy models for each table:
+- **Fragmented by city** (only on that city's node): stations, charger_units, slots, bookings, payments, refunds.
+- **Replicated** (same rows, same IDs, on all nodes): cities, pricing_plans, users, vehicles.
+- **Wallet:** `users.wallet_balance` is only real on the user's **home node** (`users.home_city_id`).
+  Booking in your home city = 1 node, plain transaction. Booking in another city = 2 nodes,
+  needs two-phase commit (phase 2).
 
-**Tasks:**
-- `user.py` — User model
-- `station.py` — Station, ChargerUnit models
-- `booking.py` — Booking, Slot models
-- `payment.py` — Payment, Refund models
-- `vehicle.py` — Vehicle model
+This needs `database/mysql/schema/02_backend_additions.sql` (adds `users.home_city_id`).
+The backend logs an error at startup if it is missing.
 
-**Example `user.py`:**
-```python
-from sqlalchemy import Column, Integer, String, DECIMAL, Boolean, TIMESTAMP
-from app.db.mysql_connection import Base
+## Run it
 
-class User(Base):
-    __tablename__ = "users"
-    
-    user_id = Column(Integer, primary_key=True)
-    email = Column(String(255), unique=True, nullable=False)
-    password_hash = Column(String(255), nullable=False)
-    full_name = Column(String(255), nullable=False)
-    wallet_balance = Column(DECIMAL(10, 2), default=0.00)
-    # ... rest of fields
-```
-
-### 📁 `app/schemas/`
-**Empty — you create these**
-
-Pydantic schemas for request/response validation:
-
-**Tasks:**
-- `user_schema.py` — UserCreate, UserResponse
-- `booking_schema.py` — BookingCreate, BookingResponse
-- `payment_schema.py` — PaymentCreate, PaymentResponse
-
-**Example:**
-```python
-from pydantic import BaseModel
-
-class BookingCreate(BaseModel):
-    user_id: int
-    slot_id: int
-    vehicle_id: int
-    
-class BookingResponse(BaseModel):
-    booking_id: int
-    booking_status: str
-    booking_amount: float
-```
-
-### 📁 `app/services/`
-**Empty — you create these**
-
-**MOST IMPORTANT** — Business logic with concurrency control:
-
-**Tasks:**
-- `booking_service.py` — **create_booking_with_lock()** function that:
-  1. Starts transaction
-  2. Acquires **row-level lock** on slot (`SELECT ... FOR UPDATE`)
-  3. Checks if slot is available
-  4. Debits wallet
-  5. Creates booking record
-  6. Commits or rolls back
-  
-**Concurrency demo code** — this is your key deliverable:
-
-```python
-from sqlalchemy.orm import Session
-from sqlalchemy import text
-
-def create_booking_with_lock(db: Session, user_id: int, slot_id: int):
-    try:
-        db.begin()  # Start transaction
-        
-        # LOCK THE SLOT ROW (2-Phase Locking)
-        slot = db.execute(
-            text("SELECT * FROM slots WHERE slot_id = :slot_id FOR UPDATE"),
-            {"slot_id": slot_id}
-        ).fetchone()
-        
-        if not slot or not slot.is_available:
-            raise Exception("Slot not available")
-        
-        # Debit payment (simplified)
-        db.execute(
-            text("UPDATE users SET wallet_balance = wallet_balance - 100 WHERE user_id = :user_id"),
-            {"user_id": user_id}
-        )
-        
-        # Create booking
-        result = db.execute(
-            text("INSERT INTO bookings (user_id, slot_id, booking_status, booking_amount) VALUES (:user_id, :slot_id, 'confirmed', 100)"),
-            {"user_id": user_id, "slot_id": slot_id}
-        )
-        
-        # Mark slot as booked
-        db.execute(
-            text("UPDATE slots SET is_available = 0 WHERE slot_id = :slot_id"),
-            {"slot_id": slot_id}
-        )
-        
-        db.commit()
-        return {"booking_id": result.lastrowid}
-    
-    except Exception as e:
-        db.rollback()
-        raise e
-```
-
----
-
-## Concurrency Demo
-
-Create `docs/CONCURRENCY.md`:
-- Explain the lost-update problem
-- Show your 2PL implementation
-- Provide curl commands to fire two simultaneous requests
-- Screenshot of transaction logs showing lock acquisition
-
----
-
-## Recovery Demo
-
-Create `docs/RECOVERY_DEMO.md`:
-- Explain deferred update recovery
-- Show how to simulate node crash mid-transaction
-- Show WAL inspection after recovery
-
----
-
-## Testing Your Work
+### With Docker (whole project)
 
 ```bash
-# Start backend
-docker-compose up backend
-
-# Test booking endpoint
-curl -X POST http://localhost:8000/api/bookings \
-  -H "Content-Type: application/json" \
-  -d '{"user_id": 1, "slot_id": 42, "vehicle_id": 1}'
-
-# Fire two simultaneous bookings (concurrency test)
-curl -X POST http://localhost:8000/api/bookings -d '{"user_id":1,"slot_id":42,"vehicle_id":1}' & \
-curl -X POST http://localhost:8000/api/bookings -d '{"user_id":2,"slot_id":42,"vehicle_id":2}' &
+docker-compose up --build
+docker exec ev-backend python -m scripts.seed_demo_data      # once, loads test data
+docker exec ev-backend python demo/concurrency_demo.py       # the demo
 ```
 
----
+If you already had the MySQL containers before `02_backend_additions.sql` was added, the init
+scripts will not rerun. Reset with `docker-compose down -v` (deletes DB data) and start again.
 
-## Your Branch
+### Without Docker (backend only, against local MySQL)
 
 ```bash
-git checkout -b backend-api
-# Make changes
-git add backend/
-git commit -m "feat(backend): add booking endpoint with 2PL"
-git push origin backend-api
-# Open PR to main
+cd backend
+python -m venv venv && source venv/bin/activate      # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+uvicorn app.main:app --reload --port 8000
 ```
 
----
+Defaults expect MySQL on localhost ports 3306/3307/3308 with user `ev_user`
+(see `app/core/config.py`). Open http://localhost:8000/docs.
 
-## What You DON'T Touch
+## Settings (environment variables)
 
-- ❌ `database/` — Person 1's territory
-- ❌ `frontend/` — Person 4's territory
-- ❌ `app/db/mongodb_connection.py` — Person 3 may extend this, coordinate with them
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `DEMO_MODE` | `true` | Enables `/api/demo/*` (unsafe booking etc.). Set `false` outside demos. |
+| `SQL_ECHO` | `false` | Print every SQL statement |
+| `SECRET_KEY` | placeholder | JWT signing key |
+| `DB_TIME_ZONE` | `+05:30` | MySQL session time zone, so "slot in the past" checks use IST |
+
+## Notes for teammates
+
+- **Person 1:** please review `02_backend_additions.sql`. Also, the trigger in `database/mysql/triggers/`
+  is not loaded by Docker (only `schema/` is mounted), and it refunds the full amount rather than
+  "proportional to unused time" as in the pitch.
+- **Person 3:** the audit log writes to `audit_log` in MongoDB. If MongoDB is down, bookings still
+  work and the log is still served from memory. Suggest `serverSelectionTimeoutMS=2000` on the
+  MongoClient so a missing MongoDB fails fast.
+- **Person 4:** see `docs/API.md`. Always keep `(city, id)` pairs, since IDs repeat across cities.
