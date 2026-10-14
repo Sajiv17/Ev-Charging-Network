@@ -1,0 +1,4 @@
+# These files run inside Linux containers; a CRLF checkout on Windows breaks
+# bash ("$'\r': command not found") and the mysql client's DELIMITER handling.
+*.sh  text eol=lf
+*.sql text eol=lf
