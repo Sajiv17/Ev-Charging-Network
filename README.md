@@ -237,7 +237,7 @@ docker exec ev-mysql-bangalore mysql -u root -ppassword \
 ```bash
 # Manually set a charger to faulted
 docker exec ev-mysql-bangalore mysql -u root -ppassword \
-  -e "UPDATE ev_bangalore.charger_units SET status='faulted' WHERE id=5;"
+  -e "UPDATE ev_bangalore.charger_units SET status='faulted' WHERE charger_id=5;"
 
 # The trigger should:
 # 1. Cancel active booking on that charger

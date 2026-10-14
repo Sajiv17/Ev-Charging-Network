@@ -63,9 +63,10 @@ CREATE TABLE pricing_plans (
     CONSTRAINT chk_pricing_rate CHECK (rate_per_kwh > 0),
     CONSTRAINT chk_pricing_fee CHECK (booking_fee >= 0),
     CONSTRAINT chk_pricing_period CHECK (effective_to IS NULL OR effective_to >= effective_from),
-    -- Matches pricing.get_plan: equality on (city, type), then ORDER BY effective_from DESC
-    -- reads the index backwards instead of sorting (see docs/INDEXES.md).
-    INDEX idx_plan_lookup (city_id, charger_type, effective_from)
+    -- Candidate key (one plan per city, type and start date), and it matches pricing.get_plan:
+    -- equality on (city, type), then ORDER BY effective_from DESC reads the index backwards
+    -- instead of sorting (see docs/INDEXES.md).
+    UNIQUE KEY uq_plan_period (city_id, charger_type, effective_from)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- -----------------------------------------------------------------------------

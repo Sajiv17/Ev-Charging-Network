@@ -1,0 +1,2 @@
+# Shell scripts run under bash (Linux, macOS, Git Bash); CRLF breaks them.
+*.sh text eol=lf
