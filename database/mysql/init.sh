@@ -40,7 +40,10 @@ ev_apply_dir() {
     # LC_ALL=C: byte order, so 01_ < 02_ < a < b regardless of the container locale.
     for f in $(find "$dir" -maxdepth 1 -type f -name '*.sql' | LC_ALL=C sort); do
         echo "init.sh: [$EV_CITY] applying ${f#"$EV_SQL_ROOT"/}"
-        docker_process_sql < "$f"
+        # The entrypoint's temporary init server runs with --default-time-zone=SYSTEM (UTC),
+        # not our compose setting; force IST so CURDATE() in seeds and the event's stored
+        # time zone match the running node.
+        docker_process_sql --init-command="SET time_zone = '+05:30'" < "$f"
     done
 }
 

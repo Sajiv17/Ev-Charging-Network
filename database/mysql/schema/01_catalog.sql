@@ -9,6 +9,11 @@
 -- Fragmented tables (one city's rows per node) live in 02_core.sql.
 -- =============================================================================
 
+-- The entrypoint creates the database with the server default (utf8mb4_0900_ai_ci).
+-- Trigger/procedure variables inherit the DATABASE collation, so align it with the
+-- tables; otherwise comparing a variable with a column fails with "Illegal mix of collations".
+ALTER DATABASE CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
 -- FK checks off so the drops work in any order, even with 02_core tables present.
 SET FOREIGN_KEY_CHECKS = 0;
 DROP TABLE IF EXISTS corridors;
