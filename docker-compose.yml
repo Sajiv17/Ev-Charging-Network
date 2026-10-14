@@ -11,11 +11,15 @@ services:
       MYSQL_DATABASE: ev_bangalore
       MYSQL_USER: ev_user
       MYSQL_PASSWORD: evcharge_pass_2024
+      EV_CITY: bangalore   # selects database/mysql/seeds/bangalore/
     ports:
       - "3306:3306"
     volumes:
       - mysql_bangalore_data:/var/lib/mysql
-      - ./database/mysql/schema:/docker-entrypoint-initdb.d
+      - ./database/mysql:/ev-sql:ro
+      - ./database/mysql/init.sh:/docker-entrypoint-initdb.d/00_init.sh:ro
+    # IST server default so NOW()/CURDATE() in triggers and the mysql CLI match the backend
+    command: --default-time-zone=+05:30
     networks:
       - ev-network
     healthcheck:
@@ -32,11 +36,15 @@ services:
       MYSQL_DATABASE: ev_chennai
       MYSQL_USER: ev_user
       MYSQL_PASSWORD: evcharge_pass_2024
+      EV_CITY: chennai   # selects database/mysql/seeds/chennai/
     ports:
       - "3307:3306"
     volumes:
       - mysql_chennai_data:/var/lib/mysql
-      - ./database/mysql/schema:/docker-entrypoint-initdb.d
+      - ./database/mysql:/ev-sql:ro
+      - ./database/mysql/init.sh:/docker-entrypoint-initdb.d/00_init.sh:ro
+    # IST server default so NOW()/CURDATE() in triggers and the mysql CLI match the backend
+    command: --default-time-zone=+05:30
     networks:
       - ev-network
     healthcheck:
@@ -53,11 +61,15 @@ services:
       MYSQL_DATABASE: ev_delhi
       MYSQL_USER: ev_user
       MYSQL_PASSWORD: evcharge_pass_2024
+      EV_CITY: delhi   # selects database/mysql/seeds/delhi/
     ports:
       - "3308:3306"
     volumes:
       - mysql_delhi_data:/var/lib/mysql
-      - ./database/mysql/schema:/docker-entrypoint-initdb.d
+      - ./database/mysql:/ev-sql:ro
+      - ./database/mysql/init.sh:/docker-entrypoint-initdb.d/00_init.sh:ro
+    # IST server default so NOW()/CURDATE() in triggers and the mysql CLI match the backend
+    command: --default-time-zone=+05:30
     networks:
       - ev-network
     healthcheck:

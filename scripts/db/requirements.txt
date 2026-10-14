@@ -1,0 +1,4 @@
+# Seed generation only (fetch_stations.py uses the standard library for HTTP).
+# Same versions as backend/requirements.txt, so the hashes verify there.
+passlib[bcrypt]==1.7.4
+bcrypt==4.0.1
