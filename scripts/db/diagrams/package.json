@@ -1,0 +1,13 @@
+{
+  "name": "ev-db-diagrams",
+  "private": true,
+  "description": "Renders docs/images/er_diagram.png (from the live schema) and eer_users.png",
+  "type": "module",
+  "scripts": {
+    "render": "node render_diagrams.mjs"
+  },
+  "dependencies": {
+    "@hpcc-js/wasm-graphviz": "1.6.1",
+    "@resvg/resvg-js": "2.6.2"
+  }
+}

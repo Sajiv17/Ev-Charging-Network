@@ -4,7 +4,10 @@ MySQL 8.0 schema, triggers, stored procedures and seed data for the three city n
 (Bangalore, Chennai, Delhi). MongoDB (`mongodb/`) belongs to Person 3.
 
 Design write-ups: [ER diagram](../docs/ER_DIAGRAM.md) · [Normalization](../docs/NORMALIZATION.md) ·
-[Indexes + EXPLAIN](../docs/INDEXES.md) · [Corridor query](../docs/CORRIDOR_QUERY.md)
+[Indexes + EXPLAIN](../docs/INDEXES.md) · [Corridor query](../docs/CORRIDOR_QUERY.md) ·
+[Crash recovery and deadlocks](../docs/DB_RECOVERY_AND_DEADLOCK.md)
+
+![ER diagram](../docs/images/er_diagram.png)
 
 ## Folder layout
 
@@ -14,12 +17,14 @@ database/mysql/
 ├── schema/
 │   ├── 01_catalog.sql         cities, connector_types, pricing_plans, corridors      (replicated)
 │   └── 02_core.sql            users, vehicles (replicated); stations, charger_units, slots,
-│                              bookings, payments, refunds, corridor_stations (fragmented)
+│                              bookings, payments, refunds, corridor_stations,
+│                              operator_alerts (fragmented)
 ├── triggers/
 │   ├── charger_fault_trigger.sql     fault -> cancel + refund; repair -> re-open slots
 │   ├── charger_type_consistency.sql  charger_type must match the connector (AC/DC)
 │   ├── slot_availability.sql         bookings keep slots.is_available in step
 │   ├── slot_overlap.sql              no overlapping slots on a charger
+│   ├── station_operator_role.sql     only operators/admins run a station (EER rule)
 │   └── wallet_guard.sql              readable error for a negative wallet
 ├── procedures/
 │   ├── sp_create_booking.sql   2PL booking in SQL (viva demo + tests; the backend does not call it)
@@ -37,6 +42,9 @@ database/mysql/
 `seeds/` is **generated**. Edit `scripts/db/seed_data.py` or `generate_seeds.py`, then run
 `python scripts/db/generate_seeds.py`. Do not edit the SQL by hand.
 
+Index names follow CONTRIBUTING.md: `idx_<table>_<column(s)>`, and `uq_<table>_<column(s)>` for
+UNIQUE keys.
+
 ## How a node is initialised
 
 `docker-compose.yml` mounts `./database/mysql` read-only at `/ev-sql` and `init.sh` as
@@ -46,6 +54,9 @@ runs `init.sh` once; it does not recurse into folders itself. `init.sh` applies,
 ```
 schema/  ->  triggers/  ->  procedures/  ->  seeds/common/  ->  seeds/$EV_CITY/
 ```
+
+Before the files, it grants `XA_RECOVER_ADMIN` to `MYSQL_USER` (`ev_user`). MySQL 8 requires it for
+`XA RECOVER`, which the backend's two-phase-commit coordinator needs after a crash.
 
 Each file runs in a session with `time_zone = '+05:30'`, the same as the nodes (`--default-time-zone=+05:30`)
 and the backend's connections. So `NOW()`/`CURDATE()` in seeds, triggers and the slot event are IST
@@ -66,7 +77,7 @@ MySQL containers and their volumes, then runs the tests).
 | | Tables | On each node |
 |---|---|---|
 | Replicated | cities, connector_types, pricing_plans, corridors, users, vehicles | all rows, identical IDs |
-| Fragmented | stations, charger_units, slots, bookings, payments, refunds, corridor_stations | that city's rows only; IDs repeat across nodes, so the API uses `(city, id)` |
+| Fragmented | stations, charger_units, slots, bookings, payments, refunds, corridor_stations, operator_alerts | that city's rows only; IDs repeat across nodes, so the API uses `(city, id)` |
 
 **Wallets.** `users.wallet_balance` is replicated with the user, but only the copy on the user's
 home node (`users.home_city_id`) is authoritative. The seed writes the same value on every node.
@@ -109,11 +120,12 @@ notice wherever the data is used. OCM stations are tagged with their POI id in
 
 | Object | Fires / called | Effect |
 |---|---|---|
-| `after_charger_fault` | `UPDATE charger_units SET status='faulted'` | Cancels the charger's active bookings and its confirmed bookings whose slot has not ended. Refunds active ones in proportion to unused time and confirmed ones in full. Payment → refunded. Refund `completed` + wallet credited if the user's home node is this node, else `queued`. Earlier cancellations are untouched. |
-| | `faulted → available` | Re-opens future slots with no live booking |
+| `after_charger_fault` | `UPDATE charger_units SET status='faulted'` | Cancels the charger's active bookings and its confirmed bookings whose slot has not ended. Refunds active ones in proportion to unused time and confirmed ones in full. Payment → refunded. Refund `completed` + wallet credited if the user's home node is this node, else `queued`. Earlier cancellations are untouched. Writes an `operator_alerts` row for the station's operator (counts and totals). |
+| | `faulted → available` | Re-opens future slots with no live booking; writes a `charger_repaired` alert |
 | `trg_charger_type_before_insert/update` | charger insert/update | Rejects e.g. `charger_type='AC'` with `connector_type='CCS2'` |
 | `trg_slots_no_overlap_insert/update` | slot insert/update | Rejects overlapping intervals on the same charger and date (back-to-back is fine) |
 | `trg_bookings_slot_after_insert/update` | booking insert/status change | Keeps `slots.is_available` consistent |
+| `trg_stations_operator_role_before_insert/update` | station insert / operator change | EER rule: the operator must have role `operator` or `admin` |
 | `trg_users_wallet_guard` | wallet update | Friendly message; `CHECK (wallet_balance >= 0)` is the real guard |
 | `CALL sp_create_booking(user, slot, vehicle, @booking_id, @amount)` | manual | Same 2PL transaction as the backend (lock slot, then wallet); rolls back on any error |
 | `CALL sp_process_refund(refund_id)` | coordinator / manual | Local wallet → credit + `completed`; remote → returns `(user_id, home_city_id, amount)` |
@@ -126,8 +138,13 @@ Try the fault trigger:
 docker exec -it ev-mysql-bangalore mysql -uroot -pevcharge_root_2024 ev_bangalore
 UPDATE charger_units SET status = 'faulted' WHERE charger_id = 5;
 SELECT * FROM refunds ORDER BY refund_id DESC LIMIT 5;
+SELECT * FROM operator_alerts ORDER BY alert_id DESC LIMIT 5;   -- the "operator alerted" step
 UPDATE charger_units SET status = 'available' WHERE charger_id = 5;
 ```
+
+Operator panel query (unread alerts): `SELECT * FROM operator_alerts WHERE operator_id = ? AND
+acknowledged_at IS NULL ORDER BY alert_id DESC`. Mark one read: `UPDATE operator_alerts SET
+acknowledged_at = NOW() WHERE alert_id = ?`.
 
 ## Tests
 
@@ -136,10 +153,29 @@ scripts/db/run_db_tests.sh --fresh    # recreate the 3 MySQL nodes, then run all
 scripts/db/run_db_tests.sh            # run against the running nodes (expects fresh seed data)
 ```
 
-It prints PASS/FAIL per check (46 checks): time zone, identical schema, fragmentation, identical
-replicated IDs, `is_available` invariant, every constraint and trigger, the delete rules, all
-procedures, the fault trigger scenarios, schema re-runs, and the optional guard. It exits non-zero on
+It prints PASS/FAIL per check (51 checks): time zone, identical schema, fragmentation, identical
+replicated IDs, `is_available` invariant, every constraint and trigger (including the EER operator
+rule), the delete rules, the XA grant, all procedures, the fault trigger scenarios and operator
+alerts, schema re-runs, and the optional guard. It exits non-zero on
 any failure. Works from Linux, macOS and Git Bash on Windows.
+
+## Demos for the viva
+
+```bash
+scripts/db/deadlock_demo.sh          # wrong lock order -> deadlock (1213); slot -> wallet order -> none
+scripts/db/crash_recovery_demo.sh    # kill -9 mid-transaction: redo/undo recovery, XA in-doubt + XA RECOVER
+```
+
+What they show and real output: [`docs/DB_RECOVERY_AND_DEADLOCK.md`](../docs/DB_RECOVERY_AND_DEADLOCK.md).
+
+## Diagrams
+
+`docs/images/er_diagram.png` (all tables, from the live schema) and `docs/images/eer_users.png`
+(USER specialization). After a schema change, with the nodes running:
+
+```bash
+cd scripts/db/diagrams && npm install && node render_diagrams.mjs
+```
 
 ## `optional/`: database-level double-booking guard
 

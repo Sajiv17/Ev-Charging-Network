@@ -178,8 +178,8 @@ Charger fault mid-session → trigger fires → booking cancelled → refund que
 
 3. **Load sample data**
    ```bash
-   # Run seed scripts (from another terminal while containers are up)
-   docker exec ev-backend python scripts/seed_mysql.py
+   # MySQL: nothing to run - each node seeds itself on first start (database/mysql/init.sh).
+   # To reload it: docker-compose down -v && docker-compose up --build
    docker exec ev-backend python scripts/seed_mongodb.py
    ```
 
@@ -228,7 +228,7 @@ docker kill ev-mysql-bangalore
 docker start ev-mysql-bangalore
 
 # Check the WAL and booking status
-docker exec ev-mysql-bangalore mysql -u root -ppassword \
+docker exec ev-mysql-bangalore mysql -u root -pevcharge_root_2024 \
   -e "SELECT * FROM ev_bangalore.bookings WHERE slot_id=50;"
 # Booking should be rolled back (not present)
 ```
@@ -236,17 +236,18 @@ docker exec ev-mysql-bangalore mysql -u root -ppassword \
 ### Trigger Demo (Charger Fault → Auto Refund)
 ```bash
 # Manually set a charger to faulted
-docker exec ev-mysql-bangalore mysql -u root -ppassword \
+docker exec ev-mysql-bangalore mysql -u root -pevcharge_root_2024 \
   -e "UPDATE ev_bangalore.charger_units SET status='faulted' WHERE charger_id=5;"
 
 # The trigger should:
-# 1. Cancel active booking on that charger
-# 2. Queue refund
-# 3. Log fault event
+# 1. Cancel the charger's active and upcoming bookings
+# 2. Refund them (proportional for an active session; credited now, or queued for another node)
+# 3. Alert the station operator (a row in operator_alerts)
 
 # Verify trigger fired
-docker exec ev-mysql-bangalore mysql -u root -ppassword \
-  -e "SELECT * FROM ev_bangalore.refunds ORDER BY created_at DESC LIMIT 5;"
+docker exec ev-mysql-bangalore mysql -u root -pevcharge_root_2024 \
+  -e "SELECT * FROM ev_bangalore.refunds ORDER BY created_at DESC LIMIT 5;
+      SELECT * FROM ev_bangalore.operator_alerts ORDER BY alert_id DESC LIMIT 5;"
 ```
 
 ---

@@ -140,8 +140,9 @@ Check every relation's determinants:
 | bookings | `booking_id` | (see §7 for `user_id`) | ✓ |
 | payments | `payment_id`, `transaction_id` | none | ✓ |
 | refunds | `refund_id` | none | ✓ |
-| pricing_plans | `plan_id`, `(city_id, charger_type, effective_from)` (UNIQUE `uq_plan_period`) | none | ✓ |
+| pricing_plans | `plan_id`, `(city_id, charger_type, effective_from)` (UNIQUE `uq_pricing_plans_city_id_charger_type_effective_from`) | none | ✓ |
 | corridors / corridor_stations | `corridor_id` / `(corridor_id, station_id)` | none | ✓ |
+| operator_alerts | `alert_id` | none (see §7 for `operator_id`) | ✓ |
 
 **BCNF decomposition of `charger_units`** on the violating FD `connector_type → current_type`:
 
@@ -239,10 +240,12 @@ can never be wrong. Status-only updates (fault/repair) skip the lookup.
 
 | Column | Why it is a fact, not a copy |
 |---|---|
-| `bookings.user_id` | Today the backend only books a user's own vehicle, so `vehicle_id → user_id` would make this transitive. But it records **who paid**, which may differ from the owner (fleet or family cars), and it keeps "my bookings" (`idx_booking_user_status`) a single-table lookup. |
+| `bookings.user_id` | Today the backend only books a user's own vehicle, so `vehicle_id → user_id` would make this transitive. But it records **who paid**, which may differ from the owner (fleet or family cars), and it keeps "my bookings" (`idx_bookings_user_id_booking_status`) a single-table lookup. |
 | `bookings.booking_amount` | Snapshot of the prepaid price at booking time; plans change later (§1). |
 | `payments.amount` | Equals `booking_amount` today. Phase-2 kWh settlement will make them differ (final bill and partial refunds). |
 | `stations.city_id` on a fragmented node | Constant per node, but it keeps rows self-describing when results from several nodes are merged, and it is what the fragmentation predicate (`city_id = node`) is written in. |
+| `operator_alerts.operator_id` | It looks derivable (`charger_id → station_id → operator_id`), but it records **who was alerted at that moment**. If the station later gets a new operator, old alerts must still belong to the person who received them. Like `booking_amount`, it is a historical fact, not a copy. The alert does not store `station_id`, which really would be derivable from `charger_id`. |
+| `users.role` | The discriminator of the EER specialization (DRIVER / OPERATOR / ADMIN, disjoint and total), mapped to one table because the subclasses have no attributes of their own. See `docs/ER_DIAGRAM.md`. |
 
 ## 8. Final schema
 
@@ -269,6 +272,9 @@ payments(payment_id PK, booking_id FK, amount, payment_method, payment_status,
 refunds(refund_id PK, payment_id FK, refund_amount, refund_reason, refund_status,
         created_at, processed_at)                                                   fragmented
 corridor_stations(corridor_id FK, station_id FK, km_marker; PK(corridor_id, station_id))  fragmented
+operator_alerts(alert_id PK, charger_id FK, operator_id FK, alert_type, bookings_cancelled,
+                refunded_amount, queued_refund_amount, slots_reopened, message,
+                created_at, acknowledged_at)                                        fragmented
 ```
 
 `*` = deliberate redundancy, protected as described in §6. Everything else is in BCNF.

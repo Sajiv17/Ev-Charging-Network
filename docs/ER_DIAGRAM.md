@@ -1,8 +1,17 @@
 # ER Diagram
 
 Owner: Person 1 (Database). Source of truth: `database/mysql/schema/01_catalog.sql` and `02_core.sql`.
-A dbdiagram.io version is in [`er_diagram.dbml`](er_diagram.dbml): paste it into
-<https://dbdiagram.io/d> and use *Export → PNG* for the report.
+
+## Diagram (PNG, for the report)
+
+![ER diagram: every table, column, key and foreign key](images/er_diagram.png)
+
+Generated from the **live schema** (`information_schema` on the Bangalore node), so it always
+matches the DDL. Blue = replicated, green = fragmented. Crow's-foot ends: `o<` zero or many on the
+child side, `||` exactly one on the parent side (`o|` where the FK column is nullable).
+Regenerate after any schema change: `cd scripts/db/diagrams && npm install && node render_diagrams.mjs`
+(also writes the SVG, `images/er_diagram.svg`, which stays sharp at any zoom).
+A dbdiagram.io version is in [`er_diagram.dbml`](er_diagram.dbml).
 
 ## Data placement
 
@@ -12,9 +21,11 @@ node holds:
 | Placement | Tables | Rows on each node | IDs |
 |---|---|---|---|
 | **Replicated** | `cities`, `connector_types`, `pricing_plans`, `corridors`, `users`, `vehicles` | all rows | identical everywhere (users/vehicles: Bangalore issues them) |
-| **Fragmented** (horizontal, by city) | `stations`, `charger_units`, `slots`, `bookings`, `payments`, `refunds`, `corridor_stations` | only that city's rows | repeat across nodes; the API addresses rows as `(city, id)` |
+| **Fragmented** (horizontal, by city) | `stations`, `charger_units`, `slots`, `bookings`, `payments`, `refunds`, `corridor_stations`, `operator_alerts` | only that city's rows | repeat across nodes; the API addresses rows as `(city, id)` |
 
-In the diagram, the first attribute comment of each entity says **REPLICATED** or **FRAGMENTED**.
+## The same model as Mermaid (renders on GitHub)
+
+The first attribute comment of each entity says **REPLICATED** or **FRAGMENTED**.
 
 ```mermaid
 erDiagram
@@ -124,6 +135,18 @@ erDiagram
         int station_id PK, FK
         decimal km_marker
     }
+    operator_alerts {
+        int alert_id PK "FRAGMENTED: written by the fault trigger"
+        int charger_id FK
+        int operator_id FK "recipient when the alert was raised"
+        enum alert_type "charger_faulted, charger_repaired"
+        int bookings_cancelled
+        decimal refunded_amount
+        decimal queued_refund_amount
+        int slots_reopened
+        varchar message
+        timestamp acknowledged_at "NULL = unread"
+    }
 
     cities ||--o{ pricing_plans : "prices"
     cities ||--o{ users : "is home node of"
@@ -142,7 +165,28 @@ erDiagram
     payments ||--o{ refunds : "is refunded by"
     corridors ||--o{ corridor_stations : "lists"
     stations ||--o{ corridor_stations : "lies on"
+    charger_units ||--o{ operator_alerts : "raises"
+    users ||--o{ operator_alerts : "is alerted by"
 ```
+
+## EER: specialization of USER
+
+![EER diagram: USER specialized into DRIVER, OPERATOR, ADMIN](images/eer_users.png)
+
+- **Specialization.** `USER` is specialized on the defining attribute `role` into `DRIVER`,
+  `OPERATOR` and `ADMIN`. It is **disjoint** (a user has exactly one role) and **total** (every
+  user has one; the column defaults to `driver`).
+- **Subclass relationships.** `OPERATES` (station) and `RECEIVES` (operator alerts) belong to
+  the `OPERATOR` subclass. Admins may also operate a station. `OWNS` (vehicle) and `MAKES`
+  (booking) stay on the superclass, because staff can drive and charge too.
+- **Mapping choice: one table with a type attribute.** The subclasses add no attributes of their
+  own, so a table per subclass would only add three 1:1 joins to every login and booking.
+  - What a single table loses is the ability to say, with a foreign key alone, "only operators
+    operate stations". `trg_stations_operator_role_before_insert` / `_update`
+    (`triggers/station_operator_role.sql`) enforce that rule instead.
+  - Alerts are written by the fault trigger to the station's operator, so their recipient is in
+    the subclass by construction.
+- Source: `scripts/db/diagrams/eer_users.dot`, rendered with the ER diagram.
 
 ## Notes for the viva
 
@@ -161,5 +205,5 @@ erDiagram
   city, so no foreign key ever crosses nodes.
 - **Delete rules.** `bookings`, `payments` and `refunds` are never removed by a cascade: every FK
   into or out of them is `RESTRICT`. Cascades exist only for structural data with no money
-  attached (station → chargers → slots, user → vehicles, corridor membership), and they stop at
-  the first booking.
+  attached (station → chargers → slots, user → vehicles, corridor membership, charger → its
+  alerts), and they stop at the first booking.

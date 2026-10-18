@@ -16,7 +16,7 @@ nothing more than a table and an index:
 ```
 corridors          (corridor_id PK, corridor_name, highway, origin_city_id → cities, destination, length_km)   replicated
 corridor_stations  (corridor_id → corridors, station_id → stations, km_marker)  PK (corridor_id, station_id)    fragmented
-                   INDEX idx_cs_km (corridor_id, km_marker)
+                   INDEX idx_corridor_stations_corridor_id_km_marker (corridor_id, km_marker)
 ```
 
 A graph database (Neo4j and similar) pays off when the question is **path finding over an
@@ -57,11 +57,11 @@ SELECT cs.km_marker, s.station_id, s.station_name, s.latitude, s.longitude,
 
 ```
 -> Nested loop inner join
-    -> Covering index lookup on cs using idx_cs_km (corridor_id=1)
+    -> Covering index lookup on cs using idx_corridor_stations_corridor_id_km_marker (corridor_id=1)
     -> Single-row covering index lookup on s using PRIMARY (station_id=cs.station_id)
 ```
 
-The rows come out of `idx_cs_km` already in `km_marker` order, so there is no sort.
+The rows come out of `idx_corridor_stations_corridor_id_km_marker` already in `km_marker` order, so there is no sort.
 
 ## Merging across nodes (the API's job)
 
