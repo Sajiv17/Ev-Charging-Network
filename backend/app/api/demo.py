@@ -15,16 +15,27 @@ router = APIRouter()
 @router.post("/book", response_model=BookingResponse, status_code=201)
 def demo_book(body: DemoBookingCreate, current=Depends(get_current_user)):
     """
-    mode=locked -> the real booking transaction (2PL)
-    mode=unsafe -> no locks: shows double booking
-    delay_ms    -> pause inside the transaction to make the race visible
+    mode=locked      -> the real booking transaction (2PL; 2PC if the wallet is on another node)
+    mode=unsafe      -> no locks: shows double booking / lost update
+    mode=wrong_order -> locks wallet BEFORE slot: with a locked request at the same time -> deadlock
+    delay_ms         -> pause while holding the locks
+    lock_gap_ms      -> pause between the first and the second lock
+    fail_point       -> after_prepare / after_decision: simulate a coordinator crash during 2PC
     """
-    fn = (
-        booking_service.create_booking_with_lock
-        if body.mode == "locked"
-        else booking_service.create_booking_unsafe
+    if body.mode == "unsafe":
+        return booking_service.create_booking_unsafe(
+            current, body.city, body.slot_id, body.vehicle_id, delay_ms=body.delay_ms
+        )
+    return booking_service.create_booking_with_lock(
+        current,
+        body.city,
+        body.slot_id,
+        body.vehicle_id,
+        delay_ms=body.delay_ms,
+        lock_order="wallet_first" if body.mode == "wrong_order" else "slot_first",
+        lock_gap_ms=body.lock_gap_ms,
+        fail_point=body.fail_point,
     )
-    return fn(current, body.city, body.slot_id, body.vehicle_id, delay_ms=body.delay_ms)
 
 
 @router.post("/fresh-slot")

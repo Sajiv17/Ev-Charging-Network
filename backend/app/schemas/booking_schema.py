@@ -13,9 +13,13 @@ class BookingCreate(BaseModel):
 
 
 class DemoBookingCreate(BookingCreate):
-    mode: Literal["locked", "unsafe"] = "locked"
+    mode: Literal["locked", "unsafe", "wrong_order"] = "locked"
     delay_ms: int = Field(
         default=0, ge=0, le=5000, description="Pause inside the transaction to widen the race window"
+    )
+    lock_gap_ms: int = Field(default=0, ge=0, le=5000, description="Pause between the first and second lock")
+    fail_point: Literal["after_prepare", "after_decision"] | None = Field(
+        default=None, description="Simulate a 2PC coordinator crash (recovery demo)"
     )
 
 
@@ -38,6 +42,8 @@ class BookingResponse(BaseModel):
     transaction_id: str | None = None
     wallet_balance_after: float | None = None
     created_at: datetime | None = None
+    # Only for cross-city bookings: {"gtrid", "wallet_node", "pending_commit"}
+    distributed: dict | None = None
 
 
 class CancelResponse(BaseModel):

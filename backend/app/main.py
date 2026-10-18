@@ -6,7 +6,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 
-from app.api import bookings, stations, users
+from app.api import bookings, operations, stations, users
 from app.core.config import settings
 from app.db.mysql_connection import ENGINES
 from app.services.errors import AppError
@@ -85,11 +85,23 @@ def health_check():
 app.include_router(users.router, prefix="/api/users", tags=["users"])
 app.include_router(stations.router, prefix="/api/stations", tags=["stations"])
 app.include_router(bookings.router, prefix="/api/bookings", tags=["bookings"])
+app.include_router(operations.sessions, prefix="/api/sessions", tags=["sessions"])
+app.include_router(operations.payments, prefix="/api/payments", tags=["payments"])
+app.include_router(operations.chargers, prefix="/api/chargers", tags=["chargers"])
+app.include_router(operations.operator, prefix="/api/operator", tags=["operator"])
+app.include_router(operations.admin, prefix="/api/admin", tags=["admin"])
 
 if settings.DEMO_MODE:
     from app.api import demo
 
     app.include_router(demo.router, prefix="/api/demo", tags=["demo"])
+
+
+@app.on_event("startup")
+def _start_recovery_worker():
+    from app.services import recovery_service
+
+    recovery_service.start_background_worker()
 
 
 @app.on_event("startup")
@@ -106,8 +118,8 @@ def _check_schema():
                 ).scalar()
             if not has_col:
                 log.error(
-                    "[%s] users.home_city_id is missing - run "
-                    "database/mysql/schema/02_backend_additions.sql",
+                    "[%s] users.home_city_id is missing - the node was built from an old schema; "
+                    "rebuild it with docker-compose down -v && docker-compose up --build",
                     city,
                 )
         except Exception as exc:

@@ -77,7 +77,46 @@ A real deadlock appeared while building the *unsafe* demo: inserting a booking m
 InnoDB take a **shared** lock on the referenced slot row (foreign-key check). Two
 transactions holding S locks on the same row that then both try to `UPDATE` it (X lock)
 wait for each other, which is a deadlock. This is a good viva example of an
-S-to-X lock upgrade deadlock, and it will be the basis of the deadlock demo in phase 2.
+S-to-X lock upgrade deadlock.
+
+### Deadlock demo (`--scenario deadlock`)
+
+To show *why* the lock order matters, the demo endpoint has a deliberately wrong mode
+(`mode=wrong_order`, never used by the real API) that locks the **wallet first, then the slot**.
+Two requests from the same driver for the same slot, 600 ms between their two locks:
+
+```
+=== WRONG LOCK ORDER (slot->wallet vs wallet->slot) ===
+   +    1ms  tx-6f121cae  LOCK_ACQUIRED   resource=slots[2096]
+   +    4ms  tx-901af9be  LOCK_ACQUIRED   resource=users[31].wallet
+   +  604ms  tx-6f121cae  LOCK_REQUEST    resource=users[31].wallet     <- waits for tx-901af9be
+   +  605ms  tx-901af9be  LOCK_REQUEST    resource=slots[2096]          <- waits for tx-6f121cae: CYCLE
+   +  612ms  tx-901af9be  ROLLBACK        reason=MySQL 1213: Deadlock found when trying to get lock
+   +  612ms  tx-901af9be  RETRY           attempt=1 mysql_errno=1213 reason=deadlock victim
+   +  617ms  tx-6f121cae  COMMIT          booking_id=51
+   + 1318ms  tx-901af9be  ROLLBACK        reason=Slot already booked      <- retry sees the booking
+   RESULT: DEADLOCK detected by InnoDB -> rolled back (error 1213) and retried by the backend
+
+=== RIGHT LOCK ORDER (both slot->wallet) ===
+   +    1ms  tx-63d211ff  LOCK_ACQUIRED   resource=slots[2097]
+   +    2ms  tx-5cdd546a  LOCK_REQUEST    resource=slots[2097]          <- just waits
+   +  610ms  tx-5cdd546a  LOCK_ACQUIRED   resource=slots[2097] waited_ms=608   <- the moment T1 commits
+   +  611ms  tx-63d211ff  COMMIT
+   RESULT: no deadlock - the second transaction simply waited for the first
+```
+
+The four Coffman conditions for deadlock are mutual exclusion, hold-and-wait, no preemption and
+**circular wait**. A global lock order removes circular wait, so no cycle can form. InnoDB's
+deadlock detector (it searches the wait-for graph for a cycle) plus our retry is the safety net.
+`docs/DB_RECOVERY_AND_DEADLOCK.md` shows the same thing from the MySQL side.
+
+### Deadlocks across nodes
+
+InnoDB only sees lock waits **inside one node**. A cross-city booking holds a lock on the
+Chennai node (slot) and one on the Bangalore node (wallet). A cycle spanning two nodes would be
+invisible to both detectors, and would only end by lock-wait timeout (error 1205, 10 s). The same
+global order (slot on the station node first, wallet on the home node second) prevents such
+cycles. The 1205 timeout + retry is the safety net. See `docs/RECOVERY_DEMO.md` for the 2PC part.
 
 ## 4. Live demo
 
@@ -86,6 +125,7 @@ cd backend
 python demo/concurrency_demo.py                      # unsafe vs locked, 5 drivers, same slot
 python demo/concurrency_demo.py --scenario wallet    # lost update on one wallet
 python demo/concurrency_demo.py --users 20 --delay 0 # stress test
+python demo/concurrency_demo.py --scenario deadlock  # deadlock + automatic retry
 ```
 
 The script fires all requests at the same instant (an `asyncio.Event` is used as a
@@ -143,7 +183,7 @@ which counts confirmed bookings straight from MySQL.
 - **2PL vs 2PC?** 2PL (Two-Phase *Locking*) is about concurrency on one node: acquire
   locks, then release them. 2PC (Two-Phase *Commit*) is about atomicity across nodes:
   PREPARE everywhere, then COMMIT everywhere. Same-city bookings use 2PL. Cross-city
-  bookings (phase 2) use 2PL on each node plus 2PC between nodes.
+  bookings use 2PL on each node plus 2PC between nodes (`app/services/xa.py`).
 - **Why not just `UPDATE slots SET is_available=0 WHERE slot_id=? AND is_available=1` and check
   rows affected?** That also works (optimistic, single-statement). We lock first because
   the booking also has to check and debit the wallet atomically, and the explicit lock makes
@@ -152,4 +192,4 @@ which counts confirmed bookings straight from MySQL.
   why the unsafe version breaks). `FOR UPDATE` is a locking read that reads the latest
   committed version (which is why the locked version works).
 - **What stops a negative wallet if the code has a bug?** `CHECK (wallet_balance >= 0)` in the
-  schema (`02_backend_additions.sql`).
+  schema (`chk_wallet_non_negative` in `database/mysql/schema/02_core.sql`).

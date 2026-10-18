@@ -19,6 +19,15 @@ class Settings(BaseSettings):
     # Print every SQL statement the backend runs (noisy, useful for debugging)
     SQL_ECHO: bool = os.getenv("SQL_ECHO", "false").lower() == "true"
 
+    # Two-phase commit coordinator
+    # Decision log (the coordinator's own write-ahead log). Kept under backend/var/,
+    # which is inside the ./backend bind mount, so it survives container restarts.
+    XA_LOG_PATH: str = os.getenv(
+        "XA_LOG_PATH", os.path.join(os.path.dirname(__file__), "..", "..", "var", "xa_coordinator.log")
+    )
+    # Seconds between background recovery passes (in-doubt XA + queued refunds). 0 = off.
+    RECOVERY_INTERVAL_S: int = int(os.getenv("RECOVERY_INTERVAL_S", "30"))
+
     # All MySQL sessions use this time zone so NOW() and slot times agree (IST)
     DB_TIME_ZONE: str = os.getenv("DB_TIME_ZONE", "+05:30")
 

@@ -21,22 +21,29 @@ from app.services.errors import AppError
 _CENT = Decimal("0.01")
 
 
+PLAN_SQL = """
+    SELECT plan_id, rate_per_kwh, booking_fee
+    FROM pricing_plans
+    WHERE city_id = :city AND charger_type = :ctype
+      AND effective_from <= :d
+      AND (effective_to IS NULL OR effective_to >= :d)
+    ORDER BY effective_from DESC
+    LIMIT 1
+"""
+
+
 def get_plan(db: Session, city_id: int, charger_type: str, on_date: date):
     """The pricing plan in force for this city + charger type on a date (or None)."""
-    return db.execute(
-        text(
-            """
-            SELECT plan_id, rate_per_kwh, booking_fee
-            FROM pricing_plans
-            WHERE city_id = :city AND charger_type = :ctype
-              AND effective_from <= :d
-              AND (effective_to IS NULL OR effective_to >= :d)
-            ORDER BY effective_from DESC
-            LIMIT 1
-            """
-        ),
-        {"city": city_id, "ctype": charger_type, "d": on_date},
-    ).first()
+    return db.execute(text(PLAN_SQL), {"city": city_id, "ctype": charger_type, "d": on_date}).first()
+
+
+def get_plan_q(q, city_id: int, charger_type: str, on_date: date):
+    """Same as get_plan, for code running on a raw XA/local connection (app.services.xa.Q)."""
+    return q.one(PLAN_SQL, city=city_id, ctype=charger_type, d=on_date)
+
+
+def _field(plan, name):
+    return plan[name] if isinstance(plan, dict) else getattr(plan, name)
 
 
 def slot_hours(start: time, end: time) -> Decimal:
@@ -55,5 +62,13 @@ def max_energy_kwh(max_power_kw, start: time, end: time, battery_kwh=None) -> De
 
 def prepaid_amount(plan, max_power_kw, start: time, end: time, battery_kwh=None) -> Decimal:
     energy = max_energy_kwh(max_power_kw, start, end, battery_kwh)
-    amount = Decimal(plan.booking_fee or 0) + Decimal(plan.rate_per_kwh) * energy
+    amount = Decimal(_field(plan, "booking_fee") or 0) + Decimal(_field(plan, "rate_per_kwh")) * energy
+    return amount.quantize(_CENT, rounding=ROUND_HALF_UP)
+
+
+def energy_cost(plan, energy_kwh) -> Decimal:
+    """Final bill for a finished session: booking fee + rate x energy actually delivered."""
+    amount = Decimal(_field(plan, "booking_fee") or 0) + Decimal(_field(plan, "rate_per_kwh")) * Decimal(
+        str(energy_kwh)
+    )
     return amount.quantize(_CENT, rounding=ROUND_HALF_UP)

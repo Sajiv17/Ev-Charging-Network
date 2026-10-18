@@ -2,6 +2,7 @@
 Booking transactions - the heart of the concurrency-control part of the project.
 
 create_booking_with_lock()  -> correct version, uses Strict Two-Phase Locking
+                               (wallet on another node -> 2PC, see cross_city.py)
 create_booking_unsafe()     -> deliberately broken version for the demo
                                (no locks -> double booking + lost update)
 cancel_booking()            -> cancel + refund, same locking rules
@@ -35,13 +36,12 @@ from sqlalchemy.orm import Session
 
 from app.core.cities import city_id_of, normalize_city
 from app.db.mysql_connection import city_session
-from app.services import audit, pricing
+from app.services import audit, cross_city, pricing
 from app.services.errors import (
     AppError,
     Forbidden,
     InsufficientBalance,
     NotFound,
-    NotImplementedYet,
     SlotUnavailable,
 )
 from app.services.station_service import _as_time, _hhmm
@@ -59,16 +59,26 @@ def _mysql_errno(exc: OperationalError) -> int | None:
     return orig.args[0] if orig is not None and orig.args else None
 
 
+def _reason(exc: Exception) -> str:
+    """Short, readable rollback reason for the audit log."""
+    if getattr(exc, "message", None):
+        return exc.message
+    orig = getattr(exc, "orig", None)
+    if orig is not None and getattr(orig, "args", None) and len(orig.args) >= 2:
+        return f"MySQL {orig.args[0]}: {orig.args[1]}"
+    return repr(exc)[:200]
+
+
 def _ms_since(t0: float) -> int:
     return int((time.perf_counter() - t0) * 1000)
 
 
 def _require_same_city(user: dict, city: str) -> None:
     if user["home_city"] != city:
-        raise NotImplementedYet(
-            f"Cross-city booking (wallet on {user['home_city']} node, station on {city} node) "
-            "needs two-phase commit across nodes; that arrives in phase 2.",
-            code="cross_city_not_ready",
+        raise AppError(
+            f"The UNSAFE demo path only books in your home city ({user['home_city']}); "
+            "cross-city bookings always use 2PC (mode=locked).",
+            code="unsafe_same_city_only",
         )
 
 
@@ -184,22 +194,45 @@ def _result(city: str, slot, booking_id, payment_id, txn_ref, amount, vehicle_id
 
 
 def create_booking_with_lock(
-    user: dict, city: str, slot_id: int, vehicle_id: int, delay_ms: int = 0, txn: str | None = None
+    user: dict,
+    city: str,
+    slot_id: int,
+    vehicle_id: int,
+    delay_ms: int = 0,
+    txn: str | None = None,
+    lock_order: str = "slot_first",
+    lock_gap_ms: int = 0,
+    fail_point: str | None = None,
 ) -> dict:
     """
     Book a slot atomically. Retries automatically if MySQL picks this
     transaction as a deadlock victim.
 
-    delay_ms: demo only - sleep while HOLDING the locks, so the evaluator
-              can watch the second transaction wait in the audit log.
+    Wallet on another node (user's home city != station city) -> two-phase
+    commit across both nodes, see app/services/cross_city.py.
+
+    Demo-only knobs:
+      delay_ms    sleep while HOLDING both locks, so the second transaction
+                  can be seen waiting in the audit log.
+      lock_order  "wallet_first" breaks the global lock-order rule on purpose
+                  (deadlock demo). Never used by the real API.
+      lock_gap_ms sleep between the first and the second lock, so two
+                  transactions each grab their first lock before either
+                  asks for its second one.
+      fail_point  simulate a coordinator crash during 2PC (recovery demo).
     """
     city = normalize_city(city)
-    _require_same_city(user, city)
     txn = txn or audit.new_txn_id()
+    if user["home_city"] != city or fail_point:
+        return cross_city.create_cross_city_booking(
+            user, city, slot_id, vehicle_id, txn=txn, fail_point=fail_point, delay_ms=delay_ms
+        )
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
-            return _locked_booking_txn(user, city, slot_id, vehicle_id, delay_ms, txn, attempt)
+            return _locked_booking_txn(
+                user, city, slot_id, vehicle_id, delay_ms, txn, attempt, lock_order, lock_gap_ms
+            )
         except OperationalError as exc:
             errno = _mysql_errno(exc)
             if errno in (MYSQL_DEADLOCK, MYSQL_LOCK_WAIT_TIMEOUT) and attempt < MAX_ATTEMPTS:
@@ -221,15 +254,42 @@ def create_booking_with_lock(
     raise AppError("Could not complete booking", code="retry_exhausted", status_code=503)
 
 
-def _locked_booking_txn(user, city, slot_id, vehicle_id, delay_ms, txn, attempt) -> dict:
+def _lock_wallet(db, txn, city, user_id):
+    audit.record("LOCK_REQUEST", txn=txn, city=city, resource=f"users[{user_id}].wallet", lock="X")
+    t0 = time.perf_counter()
+    balance = db.execute(
+        text("SELECT wallet_balance FROM users WHERE user_id = :u FOR UPDATE"), {"u": user_id}
+    ).scalar_one_or_none()
+    audit.record(
+        "LOCK_ACQUIRED", txn=txn, city=city, resource=f"users[{user_id}].wallet", waited_ms=_ms_since(t0)
+    )
+    return balance
+
+
+def _locked_booking_txn(
+    user, city, slot_id, vehicle_id, delay_ms, txn, attempt, lock_order="slot_first", lock_gap_ms=0
+) -> dict:
     user_id = user["user_id"]
     city_id = city_id_of(city)
     with city_session(city) as db:
         try:
             db.execute(text(f"SET SESSION innodb_lock_wait_timeout = {LOCK_WAIT_TIMEOUT_S}"))
             audit.record(
-                "BEGIN", txn=txn, city=city, mode="locked", user_id=user_id, slot_id=slot_id, attempt=attempt
+                "BEGIN",
+                txn=txn,
+                city=city,
+                mode="locked" if lock_order == "slot_first" else "WRONG_LOCK_ORDER",
+                user_id=user_id,
+                slot_id=slot_id,
+                attempt=attempt,
             )
+
+            balance = None
+            if lock_order == "wallet_first":
+                # DEADLOCK DEMO ONLY: wallet before slot breaks the global lock order.
+                balance = _lock_wallet(db, txn, city, user_id)
+                if lock_gap_ms:
+                    time.sleep(lock_gap_ms / 1000)
 
             # ---- GROWING PHASE: lock 1 = the slot row ----------------------------
             # FOR UPDATE OF sl -> exclusive lock on the slots row only (not the
@@ -247,18 +307,10 @@ def _locked_booking_txn(user, city, slot_id, vehicle_id, delay_ms, txn, attempt)
             amount = _price(db, slot, vehicle, city_id)
 
             # ---- GROWING PHASE: lock 2 = the wallet row ---------------------------
-            audit.record("LOCK_REQUEST", txn=txn, city=city, resource=f"users[{user_id}].wallet", lock="X")
-            t0 = time.perf_counter()
-            balance = db.execute(
-                text("SELECT wallet_balance FROM users WHERE user_id = :u FOR UPDATE"), {"u": user_id}
-            ).scalar_one_or_none()
-            audit.record(
-                "LOCK_ACQUIRED",
-                txn=txn,
-                city=city,
-                resource=f"users[{user_id}].wallet",
-                waited_ms=_ms_since(t0),
-            )
+            if lock_order == "slot_first":
+                if lock_gap_ms:
+                    time.sleep(lock_gap_ms / 1000)
+                balance = _lock_wallet(db, txn, city, user_id)
             if balance is None:
                 raise NotFound("User not found on this node")
             if balance < amount:
@@ -294,7 +346,7 @@ def _locked_booking_txn(user, city, slot_id, vehicle_id, delay_ms, txn, attempt)
                 "ROLLBACK",
                 txn=txn,
                 city=city,
-                reason=getattr(exc, "message", None) or repr(exc)[:200],
+                reason=_reason(exc),
                 locks_released=True,
             )
             raise
@@ -366,9 +418,7 @@ def create_booking_unsafe(
             return _result(city, slot, booking_id, payment_id, txn_ref, amount, vehicle_id, new_balance)
         except Exception as exc:
             db.rollback()
-            audit.record(
-                "ROLLBACK", txn=txn, city=city, reason=getattr(exc, "message", None) or repr(exc)[:200]
-            )
+            audit.record("ROLLBACK", txn=txn, city=city, reason=_reason(exc))
             raise
 
 
@@ -383,7 +433,8 @@ def cancel_booking(user: dict, city: str, booking_id: int) -> dict:
     Lock order: booking -> slot -> wallet (slot before wallet, same as booking).
     """
     city = normalize_city(city)
-    _require_same_city(user, city)
+    if user["home_city"] != city:
+        return cross_city.cancel_cross_city(user, city, booking_id)
     txn = audit.new_txn_id()
     user_id = user["user_id"]
 
@@ -473,7 +524,7 @@ def cancel_booking(user: dict, city: str, booking_id: int) -> dict:
                         "ROLLBACK",
                         txn=txn,
                         city=city,
-                        reason=getattr(exc, "message", None) or repr(exc)[:200],
+                        reason=_reason(exc),
                     )
                     raise
         except OperationalError as exc:

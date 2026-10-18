@@ -20,7 +20,9 @@ Interactive docs with "Try it out": **http://localhost:8000/docs**
 | 404 | `not_found` | |
 | 409 | `slot_unavailable`, `slot_in_past`, `charger_unavailable` | Someone else got the slot → refresh slots |
 | 409 | `email_taken`, `not_cancellable` | |
-| 501 | `cross_city_not_ready` | Booking outside your home city (comes in phase 2) |
+| 409 | `outside_slot_window`, `not_startable`, `not_active`, `charger_busy` | Session start/end not allowed now |
+| 400 | `energy_too_high` | Session end: more kWh than the slot can deliver |
+| 403 | `forbidden` | Operator acting on another operator's station |
 | 503 | `node_unavailable`, `lock_timeout` | A city node is down / busy → retry |
 
 ## Users
@@ -77,17 +79,74 @@ Tip: pass the user's vehicle `connector_type` to only show compatible chargers.
 | GET | `/api/bookings/{city}/{booking_id}` | | booking |
 | POST | `/api/bookings/{city}/{booking_id}/cancel` | | `{city, booking_id, booking_status, refund_amount, wallet_balance_after}` |
 
-Booking: `{city, booking_id, booking_status, booking_amount, slot_id, vehicle_id, charger_id, charger_code, station_id, station_name, slot_date, start_time, end_time, payment_id, payment_status, transaction_id, wallet_balance_after, created_at}`
+Booking: `{city, booking_id, booking_status, booking_amount, slot_id, vehicle_id, charger_id, charger_code, station_id, station_name, slot_date, start_time, end_time, payment_id, payment_status, transaction_id, wallet_balance_after, created_at, distributed}`
 
 `booking_status`: `confirmed`, `active`, `completed`, `cancelled`.
-The booking amount is a **prepayment** for the most energy the slot can deliver; after the
-session the unused part is refunded (phase 2).
+The booking amount is a **prepayment** for the most energy the slot can deliver; when the
+session ends, the unused part is refunded to the wallet.
+
+**Booking in another city works the same way from the frontend.** If the station's city is not
+the user's `home_city`, the backend runs a two-phase commit across the two nodes. The response
+then also has `distributed: {gtrid, wallet_node, pending_commit}` (null for same-city bookings).
+Nice touch for the UI: show "Paid from your Bangalore wallet" when `distributed` is set.
+
+## Charging sessions 🔒
+
+| Method | Path | Body | Returns |
+|--------|------|------|---------|
+| POST | `/api/sessions/{city}/{booking_id}/start` | `{force?: bool}` | `{city, booking_id, booking_status: "active", charger_id, charger_code, session_start_time}` |
+| POST | `/api/sessions/{city}/{booking_id}/end` | `{energy_kwh}` | `{city, booking_id, booking_status: "completed", energy_consumed_kwh, prepaid, final_cost, refund_amount, wallet_balance_after}` |
+
+- Start = "scan QR at the charger". Allowed from 15 minutes before the slot until it ends.
+  `force: true` skips the time check, only when `DEMO_MODE=true` (so you can demo a session today).
+- End = "unplug". `energy_kwh` is what the charger delivered (in the demo, type it in or take it
+  from Person 3's telemetry). Final bill = booking fee + rate × kWh, never more than prepaid.
+
+## Payments 🔒
+
+| Method | Path | Returns |
+|--------|------|---------|
+| GET | `/api/payments` | `[{city, payment_id, booking_id, amount, payment_method, payment_status, transaction_id, payment_timestamp, station_name, refunded, refund_pending}]` |
+
+## Chargers
+
+| Method | Path | Returns |
+|--------|------|---------|
+| GET | `/api/chargers/{city}/{charger_id}` | `{city, charger_id, charger_code, charger_type, connector_type, max_power_kw, status, station_id, station_name, active_session, live}` |
+
+`live` is the MongoDB telemetry document from Person 3's `charger_status` collection, or `null`
+if MongoDB is not running. For the station list, `GET /api/stations/{city}/{station_id}` already
+returns every charger's `status`.
+
+## Operator panel 🔒 (role `operator` or `admin`)
+
+| Method | Path | Body | Returns |
+|--------|------|------|---------|
+| POST | `/api/operator/chargers/{city}/{charger_id}/status` | `{status: "faulted"\|"available"\|"maintenance"}` | `{old_status, status, alert, cross_city_refunds_paid}` |
+| GET | `/api/operator/alerts?unread_only=true` | | `[alert]`, the operator's stations (admin: all) |
+| POST | `/api/operator/alerts/{city}/{alert_id}/ack` | | `{acknowledged: true}` |
+
+Setting `faulted` fires the database trigger: affected bookings are cancelled and refunded and
+an alert is written. `alert.message` reads like
+"Charger CHG-01 (8) faulted: 1 booking(s) cancelled, Rs 0.00 refunded, Rs 1086.30 queued for other nodes".
+Refunds for drivers from other cities are then paid at once (`cross_city_refunds_paid`).
+An operator can only change chargers of their own stations.
+
+## Admin 🔒 (role `admin`)
+
+| Method | Path | Returns |
+|--------|------|---------|
+| GET | `/api/admin/nodes` | `{mysql_nodes: {city: "up"\|"down"}, in_doubt: {city: {reachable, prepared: [{gtrid, bqual}]}}, last_recovery}` |
+| POST | `/api/admin/recover` | runs recovery now: `{in_doubt: {committed, rolled_back, ...}, refunds: {settled, ...}}` |
+| GET | `/api/admin/xa-log` | the 2PC coordinator's decision log |
+
+For the admin panel's node-health view, `/api/admin/nodes` is the one to poll.
 
 ## Demo endpoints (only when `DEMO_MODE=true`)
 
 | Method | Path | Notes |
 |--------|------|-------|
-| POST 🔒 | `/api/demo/book` | `{city, slot_id, vehicle_id, mode: "locked"\|"unsafe", delay_ms}` |
+| POST 🔒 | `/api/demo/book` | `{city, slot_id, vehicle_id, mode: "locked"\|"unsafe"\|"wrong_order", delay_ms, lock_gap_ms, fail_point: null\|"after_prepare"\|"after_decision"}` |
 | POST | `/api/demo/fresh-slot?city=bangalore` | creates an empty slot to race on |
 | GET | `/api/demo/slot-report/{city}/{slot_id}` | `confirmed_bookings > 1` = double booked |
 | GET | `/api/demo/audit-log?after_seq=0` | live transaction log, poll with the last `seq` you saw |
@@ -95,8 +154,12 @@ session the unused part is refunded (phase 2).
 
 Audit event: `{seq, ts, event, txn, city, ...details}`. Events: `BEGIN`, `LOCK_REQUEST`,
 `LOCK_ACQUIRED` (with `waited_ms`), `HOLDING_LOCKS`, `WALLET_DEBIT`, `BOOKING_WRITTEN`,
-`COMMIT`, `ROLLBACK` (with `reason`), `RETRY`, `READ_NO_LOCK`, `RACE_WINDOW`.
-Colour suggestion for the live log: LOCK_* amber, COMMIT green, ROLLBACK red.
+`COMMIT`, `ROLLBACK` (with `reason`), `RETRY`, `READ_NO_LOCK`, `RACE_WINDOW`, and for 2PC
+`XA_BEGIN`, `XA_START`, `XA_PREPARED`, `XA_DECISION`, `XA_COMMIT`, `XA_ROLLBACK`,
+`XA_COMMIT_PENDING`, `COORDINATOR_CRASH`, `XA_RECOVERED`, plus `SESSION_STARTED`, `SESSION_ENDED`,
+`REFUND_SETTLED`, `CHARGER_STATUS`.
+Colour suggestion for the live log: LOCK_* amber, COMMIT / XA_COMMIT green, ROLLBACK / XA_ROLLBACK red,
+XA_PREPARED blue, COORDINATOR_CRASH purple.
 
 ## Health
 

@@ -9,6 +9,7 @@ Needs the API running with DEMO_MODE=true and seed data loaded.
     python demo/concurrency_demo.py --mode unsafe       # just the broken version
     python demo/concurrency_demo.py --users 10 --delay 500
     python demo/concurrency_demo.py --scenario wallet   # lost-update demo on one wallet
+    python demo/concurrency_demo.py --scenario deadlock # deadlock + automatic retry
 
 Scenarios
   slot   : N different drivers book THE SAME slot at the same instant.
@@ -17,6 +18,11 @@ Scenarios
   wallet : ONE driver books N DIFFERENT slots at the same instant.
            unsafe -> N bookings but the wallet is only charged once (lost update)
            locked -> wallet is charged for every booking
+  deadlock: two requests from ONE driver for the SAME slot at the same instant.
+           wrong order: one locks slot->wallet, the other wallet->slot -> each
+                        waits for the other -> MySQL detects the deadlock, rolls
+                        one back (error 1213), the backend retries it
+           right order: both lock slot->wallet -> the second just waits, no deadlock
 """
 
 import argparse
@@ -81,7 +87,9 @@ async def last_seq(client) -> int:
     return log[-1]["seq"] if log else 0
 
 
-async def fire(client, start: asyncio.Event, drv, slot_id: int, mode: str, delay: int) -> dict:
+async def fire(
+    client, start: asyncio.Event, drv, slot_id: int, mode: str, delay: int, lock_gap: int = 0
+) -> dict:
     await start.wait()  # everyone leaves the starting line together
     t0 = time.perf_counter()
     r = await client.post(
@@ -93,6 +101,7 @@ async def fire(client, start: asyncio.Event, drv, slot_id: int, mode: str, delay
             "vehicle_id": drv["vehicle_id"],
             "mode": mode,
             "delay_ms": delay,
+            "lock_gap_ms": lock_gap,
         },
     )
     body = r.json()
@@ -191,11 +200,43 @@ async def scenario_wallet(client, driver, n, mode, delay, show_log):
     return charged - actually_debited
 
 
+async def scenario_deadlock(client, driver, show_log):
+    for title, modes in (
+        ("WRONG LOCK ORDER (slot->wallet vs wallet->slot)", ("locked", "wrong_order")),
+        ("RIGHT LOCK ORDER (both slot->wallet)", ("locked", "locked")),
+    ):
+        slot = (await client.post("/api/demo/fresh-slot", params={"city": CITY})).json()
+        print(
+            f"\n=== {title} : driver {driver['i']}, slot #{slot['slot_id']}, 600 ms between the two locks ==="
+        )
+        seq = await last_seq(client)
+        start = asyncio.Event()
+        tasks = [
+            asyncio.create_task(fire(client, start, driver, slot["slot_id"], m, 0, lock_gap=600))
+            for m in modes
+        ]
+        await asyncio.sleep(0.2)
+        start.set()
+        results = await asyncio.gather(*tasks)
+        print_results(results)
+        events = (await client.get("/api/demo/audit-log", params={"after_seq": seq, "limit": 2000})).json()
+        victims = [e for e in events if e["event"] == "RETRY" and e.get("mysql_errno") == 1213]
+        if victims:
+            print(
+                f"\n   RESULT: DEADLOCK detected by InnoDB -> transaction {victims[0]['txn']} rolled back "
+                f"(error 1213) and retried by the backend"
+            )
+        else:
+            print("\n   RESULT: no deadlock - the second transaction simply waited for the first")
+        if show_log:
+            await print_timeline(client, seq)
+
+
 async def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--api", default="http://localhost:8000")
     p.add_argument("--mode", choices=["unsafe", "locked", "both"], default="both")
-    p.add_argument("--scenario", choices=["slot", "wallet"], default="slot")
+    p.add_argument("--scenario", choices=["slot", "wallet", "deadlock"], default="slot")
     p.add_argument("--users", type=int, default=5, help="simultaneous requests (2-20)")
     p.add_argument("--delay", type=int, default=300, help="ms to pause inside each transaction")
     p.add_argument("--no-log", action="store_true", help="hide the transaction log")
@@ -212,6 +253,10 @@ async def main():
             sys.exit("Demo endpoints are off. Start the API with DEMO_MODE=true.")
 
         n_drivers = a.users if a.scenario == "slot" else 1
+        if a.scenario == "deadlock":
+            driver = (await asyncio.gather(ensure_driver(client, 1, 5000)))[0]
+            await scenario_deadlock(client, driver, not a.no_log)
+            return
         drivers = await asyncio.gather(
             *[ensure_driver(client, i, 3000 * a.users) for i in range(1, n_drivers + 1)]
         )
