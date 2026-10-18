@@ -1,8 +1,9 @@
 -- =============================================================================
 -- No two slots on the same charger may overlap in time
 -- =============================================================================
--- unique_slot only stops two slots with the SAME start time; 10:00-11:00 and
--- 10:30-11:30 would both pass it. Intervals are half-open [start, end), so
+-- uq_slots_charger_id_slot_date_slot_start_time only stops two slots with the
+-- SAME start time; 10:00-11:00 and 10:30-11:30 would both pass it.
+-- Intervals are half-open [start, end), so
 -- back-to-back slots (10:00-11:00, 11:00-12:00) are fine; that is what
 -- sp_generate_slots and the backend's demo_service.create_fresh_slot produce.
 --

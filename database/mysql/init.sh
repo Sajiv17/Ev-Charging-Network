@@ -47,6 +47,13 @@ ev_apply_dir() {
     done
 }
 
+# XA RECOVER (listing in-doubt two-phase-commit transactions after a crash) needs
+# XA_RECOVER_ADMIN in MySQL 8; the backend's XA coordinator connects as MYSQL_USER.
+if [ -n "${MYSQL_USER:-}" ]; then
+    echo "init.sh: [$EV_CITY] granting XA_RECOVER_ADMIN to '$MYSQL_USER'"
+    docker_process_sql --database=mysql <<< "GRANT XA_RECOVER_ADMIN ON *.* TO '$MYSQL_USER'@'%';"
+fi
+
 ev_apply_dir schema
 ev_apply_dir triggers
 ev_apply_dir procedures

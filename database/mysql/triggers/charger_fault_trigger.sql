@@ -25,6 +25,11 @@
 -- 2. status changes from 'faulted' TO 'available'
 --    Re-open this charger's future slots that have no live booking.
 --
+-- Both branches end by writing one operator_alerts row for the station's
+-- operator (the "operator alerted" step): bookings cancelled, amount refunded
+-- here, amount queued for other nodes, slots re-opened. That row is also the
+-- trigger's own log for the demo: SELECT * FROM operator_alerts.
+--
 -- NOW() is IST because every node runs with --default-time-zone=+05:30, so the
 -- refund is the same whether the fault is fired by the backend or the mysql CLI.
 -- =============================================================================
@@ -53,10 +58,15 @@ BEGIN
     DECLARE v_payment_id INT;
     DECLARE v_paid DECIMAL(10, 2);
     DECLARE v_refund DECIMAL(10, 2);
+    DECLARE v_operator_id INT;
+    DECLARE v_refunded DECIMAL(10, 2) DEFAULT 0;
+    DECLARE v_queued DECIMAL(10, 2) DEFAULT 0;
+    DECLARE v_reopened INT DEFAULT 0;
+
+    SELECT city_id, operator_id INTO v_station_city, v_operator_id
+      FROM stations WHERE station_id = NEW.station_id;
 
     IF NEW.status = 'faulted' AND OLD.status <> 'faulted' THEN
-
-        SELECT city_id INTO v_station_city FROM stations WHERE station_id = NEW.station_id;
 
         -- Capture the affected IDs first, so the later UPDATEs (which change
         -- booking_status) cannot change which bookings we act on.
@@ -124,6 +134,7 @@ BEGIN
                             CONCAT('Charger fault: ', NEW.charger_code, ' (charger ', NEW.charger_id, '), ',
                                    IF(v_status = 'active', 'unused session time', 'slot not started')),
                             'completed', NOW());
+                    SET v_refunded = v_refunded + v_refund;
                 ELSE
                     -- Wallet lives on another node; a local credit would hit a non-authoritative copy.
                     INSERT INTO refunds (payment_id, refund_amount, refund_reason, refund_status)
@@ -132,11 +143,19 @@ BEGIN
                                    IF(v_status = 'active', 'unused session time', 'slot not started'),
                                    '; wallet on node ', v_home_city),
                             'queued');
+                    SET v_queued = v_queued + v_refund;
                 END IF;
             END IF;
 
             SET v_i = v_i + 1;
         END WHILE;
+
+        INSERT INTO operator_alerts (charger_id, operator_id, alert_type, bookings_cancelled,
+                                     refunded_amount, queued_refund_amount, message)
+        VALUES (NEW.charger_id, v_operator_id, 'charger_faulted', v_n, v_refunded, v_queued,
+                CONCAT('Charger ', NEW.charger_code, ' (', NEW.charger_id, ') faulted: ', v_n,
+                       ' booking(s) cancelled, Rs ', v_refunded, ' refunded, Rs ', v_queued,
+                       ' queued for other nodes'));
 
     ELSEIF OLD.status = 'faulted' AND NEW.status = 'available' THEN
 
@@ -148,6 +167,12 @@ BEGIN
            AND NOT EXISTS (SELECT 1 FROM bookings b
                             WHERE b.slot_id = sl.slot_id
                               AND b.booking_status IN ('confirmed', 'active'));
+        SET v_reopened = ROW_COUNT();
+
+        INSERT INTO operator_alerts (charger_id, operator_id, alert_type, slots_reopened, message)
+        VALUES (NEW.charger_id, v_operator_id, 'charger_repaired', v_reopened,
+                CONCAT('Charger ', NEW.charger_code, ' (', NEW.charger_id, ') repaired: ',
+                       v_reopened, ' future slot(s) re-opened'));
 
     END IF;
 END$$
@@ -158,5 +183,6 @@ DELIMITER ;
 -- Try it:
 --   UPDATE charger_units SET status = 'faulted' WHERE charger_id = 5;
 --   SELECT * FROM refunds ORDER BY created_at DESC LIMIT 10;
+--   SELECT * FROM operator_alerts ORDER BY alert_id DESC LIMIT 5;
 --   UPDATE charger_units SET status = 'available' WHERE charger_id = 5;
 -- =============================================================================

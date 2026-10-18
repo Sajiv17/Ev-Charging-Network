@@ -5,10 +5,12 @@
 --   users, vehicles
 -- FRAGMENTED (each node stores only its own city's rows; IDs repeat across
 -- nodes, so the API always addresses rows as (city, id)):
---   stations, charger_units, slots, bookings, payments, refunds, corridor_stations
+--   stations, charger_units, slots, bookings, payments, refunds, corridor_stations,
+--   operator_alerts
 -- =============================================================================
 
 SET FOREIGN_KEY_CHECKS = 0;
+DROP TABLE IF EXISTS operator_alerts;
 DROP TABLE IF EXISTS corridor_stations;
 DROP TABLE IF EXISTS refunds;
 DROP TABLE IF EXISTS payments;
@@ -26,7 +28,7 @@ SET FOREIGN_KEY_CHECKS = 1;
 
 CREATE TABLE users (
     user_id INT AUTO_INCREMENT PRIMARY KEY,
-    email VARCHAR(255) NOT NULL UNIQUE,
+    email VARCHAR(255) NOT NULL,
     password_hash VARCHAR(255) NOT NULL,
     full_name VARCHAR(255) NOT NULL,
     phone VARCHAR(20),
@@ -41,8 +43,9 @@ CREATE TABLE users (
     CONSTRAINT fk_users_home_city FOREIGN KEY (home_city_id) REFERENCES cities(city_id),
     -- The real guarantee against overdraft; trg_users_wallet_guard only adds a readable message.
     CONSTRAINT chk_wallet_non_negative CHECK (wallet_balance >= 0),
-    INDEX idx_role (role),
-    INDEX idx_home_city (home_city_id)
+    UNIQUE KEY uq_users_email (email),
+    INDEX idx_users_role (role),
+    INDEX idx_users_home_city_id (home_city_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE vehicles (
@@ -52,13 +55,14 @@ CREATE TABLE vehicles (
     model VARCHAR(100) NOT NULL COMMENT 'e.g., Nexon EV, ZS EV',
     battery_capacity_kwh DECIMAL(5, 2) NOT NULL COMMENT 'Battery size in kWh',
     connector_type VARCHAR(10) NOT NULL,
-    registration_number VARCHAR(20) UNIQUE,
+    registration_number VARCHAR(20),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     -- CASCADE is safe: bookings -> vehicles is RESTRICT, so a user with bookings cannot be removed.
     CONSTRAINT fk_vehicles_user FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
     CONSTRAINT fk_vehicles_connector FOREIGN KEY (connector_type) REFERENCES connector_types(connector_type),
     CONSTRAINT chk_vehicle_battery CHECK (battery_capacity_kwh > 0),
-    INDEX idx_user_id (user_id)
+    UNIQUE KEY uq_vehicles_registration_number (registration_number),
+    INDEX idx_vehicles_user_id (user_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- =============================================================================
@@ -80,10 +84,10 @@ CREATE TABLE stations (
     CONSTRAINT fk_stations_operator FOREIGN KEY (operator_id) REFERENCES users(user_id),
     CONSTRAINT chk_station_lat CHECK (latitude BETWEEN -90 AND 90),
     CONSTRAINT chk_station_lon CHECK (longitude BETWEEN -180 AND 180),
-    -- Also serves the city_id FK; a separate idx_city_id would be a left prefix of it.
-    INDEX idx_station_city_status (city_id, is_operational),
-    INDEX idx_operator_id (operator_id),
-    INDEX idx_coordinates (latitude, longitude)
+    -- Also serves the city_id FK; a separate city_id index would be a left prefix of it.
+    INDEX idx_stations_city_id_is_operational (city_id, is_operational),
+    INDEX idx_stations_operator_id (operator_id),
+    INDEX idx_stations_latitude_longitude (latitude, longitude)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE charger_units (
@@ -102,10 +106,10 @@ CREATE TABLE charger_units (
     CONSTRAINT fk_chargers_station FOREIGN KEY (station_id) REFERENCES stations(station_id) ON DELETE CASCADE,
     CONSTRAINT fk_chargers_connector FOREIGN KEY (connector_type) REFERENCES connector_types(connector_type),
     CONSTRAINT chk_charger_power CHECK (max_power_kw > 0),
-    -- Also serves the station_id FK, so no separate idx_station_id.
-    UNIQUE KEY unique_charger (station_id, charger_code),
-    INDEX idx_status (status),
-    INDEX idx_connector_type (connector_type)
+    -- Also serves the station_id FK, so no separate station_id index.
+    UNIQUE KEY uq_charger_units_station_id_charger_code (station_id, charger_code),
+    INDEX idx_charger_units_status (status),
+    INDEX idx_charger_units_connector_type (connector_type)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- =============================================================================
@@ -126,7 +130,7 @@ CREATE TABLE slots (
     -- Slots never cross midnight (06:00-22:00 grid), so end > start on the same date.
     CONSTRAINT chk_slot_times CHECK (slot_end_time > slot_start_time),
     -- Serves the charger_id FK, the overlap trigger and every "slots of charger X on day D" query.
-    UNIQUE KEY unique_slot (charger_id, slot_date, slot_start_time)
+    UNIQUE KEY uq_slots_charger_id_slot_date_slot_start_time (charger_id, slot_date, slot_start_time)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE bookings (
@@ -152,11 +156,11 @@ CREATE TABLE bookings (
     CONSTRAINT chk_booking_session CHECK (session_end_time >= session_start_time),
     -- No UNIQUE "one live booking per slot" here on purpose: the backend's unsafe-mode demo
     -- must be able to show a real double booking. See optional/double_booking_guard.sql.
-    INDEX idx_slot_id (slot_id),
-    INDEX idx_status (booking_status),
-    INDEX idx_session_times (session_start_time, session_end_time),
-    -- Also serves the user_id FK, so no separate idx_user_id.
-    INDEX idx_booking_user_status (user_id, booking_status)
+    INDEX idx_bookings_slot_id (slot_id),
+    INDEX idx_bookings_booking_status (booking_status),
+    INDEX idx_bookings_session_start_time_session_end_time (session_start_time, session_end_time),
+    -- Also serves the user_id FK, so no separate user_id index.
+    INDEX idx_bookings_user_id_booking_status (user_id, booking_status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- =============================================================================
@@ -169,13 +173,14 @@ CREATE TABLE payments (
     amount DECIMAL(10, 2) NOT NULL,
     payment_method ENUM('wallet', 'upi', 'card', 'netbanking') NOT NULL,
     payment_status ENUM('pending', 'completed', 'failed', 'refunded') DEFAULT 'pending',
-    transaction_id VARCHAR(255) UNIQUE,
+    transaction_id VARCHAR(255),
     payment_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     -- RESTRICT (was CASCADE): deleting a booking must never erase its payment trail.
     CONSTRAINT fk_payments_booking FOREIGN KEY (booking_id) REFERENCES bookings(booking_id) ON DELETE RESTRICT,
     CONSTRAINT chk_payment_amount CHECK (amount > 0),
-    INDEX idx_booking_id (booking_id),
-    INDEX idx_status (payment_status)
+    UNIQUE KEY uq_payments_transaction_id (transaction_id),
+    INDEX idx_payments_booking_id (booking_id),
+    INDEX idx_payments_payment_status (payment_status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE refunds (
@@ -189,8 +194,8 @@ CREATE TABLE refunds (
     processed_at TIMESTAMP NULL,
     CONSTRAINT fk_refunds_payment FOREIGN KEY (payment_id) REFERENCES payments(payment_id) ON DELETE RESTRICT,
     CONSTRAINT chk_refund_amount CHECK (refund_amount > 0),
-    INDEX idx_payment_id (payment_id),
-    INDEX idx_status (refund_status)
+    INDEX idx_refunds_payment_id (payment_id),
+    INDEX idx_refunds_refund_status (refund_status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- =============================================================================
@@ -206,6 +211,36 @@ CREATE TABLE corridor_stations (
     CONSTRAINT fk_cs_station FOREIGN KEY (station_id) REFERENCES stations(station_id) ON DELETE CASCADE,
     CONSTRAINT chk_cs_km CHECK (km_marker >= 0),
     -- Corridor query: WHERE corridor_id = ? ORDER BY km_marker.
-    INDEX idx_cs_km (corridor_id, km_marker),
-    INDEX idx_cs_station (station_id)
+    INDEX idx_corridor_stations_corridor_id_km_marker (corridor_id, km_marker),
+    INDEX idx_corridor_stations_station_id (station_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- =============================================================================
+-- OPERATOR ALERTS (fragmented: written by after_charger_fault on this node)
+-- =============================================================================
+-- The "operator alerted" step of the fault chain, and the MySQL-side record of
+-- what the trigger did, for the operator panel and the trigger demo.
+
+CREATE TABLE operator_alerts (
+    alert_id INT AUTO_INCREMENT PRIMARY KEY,
+    charger_id INT NOT NULL,
+    -- Recipient at the time of the alert. Stored, not derived via charger -> station -> operator,
+    -- because the station may change operator later and the alert must stay addressed.
+    operator_id INT NOT NULL,
+    alert_type ENUM('charger_faulted', 'charger_repaired') NOT NULL,
+    bookings_cancelled INT NOT NULL DEFAULT 0,
+    refunded_amount DECIMAL(10, 2) NOT NULL DEFAULT 0.00 COMMENT 'Credited to wallets on this node',
+    queued_refund_amount DECIMAL(10, 2) NOT NULL DEFAULT 0.00 COMMENT 'Owed to wallets on other nodes',
+    slots_reopened INT NOT NULL DEFAULT 0,
+    message VARCHAR(255) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    acknowledged_at TIMESTAMP NULL COMMENT 'Set by the operator panel; NULL = unread',
+    -- Alerts are an operational log, not money, so they may go with their charger.
+    CONSTRAINT fk_operator_alerts_charger FOREIGN KEY (charger_id) REFERENCES charger_units(charger_id) ON DELETE CASCADE,
+    CONSTRAINT fk_operator_alerts_operator FOREIGN KEY (operator_id) REFERENCES users(user_id),
+    CONSTRAINT chk_operator_alerts_counts CHECK (bookings_cancelled >= 0 AND slots_reopened >= 0
+                                                 AND refunded_amount >= 0 AND queued_refund_amount >= 0),
+    -- Operator panel: unread alerts = WHERE operator_id = ? AND acknowledged_at IS NULL.
+    INDEX idx_operator_alerts_operator_id_acknowledged_at (operator_id, acknowledged_at),
+    INDEX idx_operator_alerts_charger_id (charger_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

@@ -7,6 +7,7 @@
 -- every node, loaded from seeds/common/.
 --   cities, connector_types, pricing_plans, corridors
 -- Fragmented tables (one city's rows per node) live in 02_core.sql.
+-- Index names follow CONTRIBUTING.md: idx_<table>_<column(s)>, uq_ for UNIQUE keys.
 -- =============================================================================
 
 -- The entrypoint creates the database with the server default (utf8mb4_0900_ai_ci).
@@ -28,10 +29,11 @@ SET FOREIGN_KEY_CHECKS = 1;
 -- -----------------------------------------------------------------------------
 CREATE TABLE cities (
     city_id INT AUTO_INCREMENT PRIMARY KEY,
-    city_name VARCHAR(100) NOT NULL UNIQUE,
+    city_name VARCHAR(100) NOT NULL,
     state VARCHAR(100) NOT NULL,
     country VARCHAR(100) DEFAULT 'India',
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_cities_city_name (city_name)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- -----------------------------------------------------------------------------
@@ -66,7 +68,7 @@ CREATE TABLE pricing_plans (
     -- Candidate key (one plan per city, type and start date), and it matches pricing.get_plan:
     -- equality on (city, type), then ORDER BY effective_from DESC reads the index backwards
     -- instead of sorting (see docs/INDEXES.md).
-    UNIQUE KEY uq_plan_period (city_id, charger_type, effective_from)
+    UNIQUE KEY uq_pricing_plans_city_id_charger_type_effective_from (city_id, charger_type, effective_from)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- -----------------------------------------------------------------------------
@@ -75,11 +77,12 @@ CREATE TABLE pricing_plans (
 -- -----------------------------------------------------------------------------
 CREATE TABLE corridors (
     corridor_id INT AUTO_INCREMENT PRIMARY KEY,
-    corridor_name VARCHAR(150) NOT NULL UNIQUE,
+    corridor_name VARCHAR(150) NOT NULL,
     highway VARCHAR(50) NOT NULL COMMENT 'e.g. NH-275',
     origin_city_id INT NOT NULL COMMENT 'km_marker 0 is at this city',
     destination VARCHAR(100) NOT NULL COMMENT 'Free text: the far end need not be a node city',
     length_km DECIMAL(6, 1) NOT NULL,
     CONSTRAINT fk_corridor_origin FOREIGN KEY (origin_city_id) REFERENCES cities(city_id),
-    CONSTRAINT chk_corridor_length CHECK (length_km > 0)
+    CONSTRAINT chk_corridor_length CHECK (length_km > 0),
+    UNIQUE KEY uq_corridors_corridor_name (corridor_name)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

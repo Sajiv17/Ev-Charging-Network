@@ -24,7 +24,7 @@ ALTER TABLE bookings
     ADD COLUMN live_slot_id INT
         AS (CASE WHEN booking_status IN ('confirmed', 'active') THEN slot_id END) STORED
         COMMENT 'slot_id while the booking is live, else NULL (see optional/double_booking_guard.sql)',
-    ADD UNIQUE KEY uq_one_live_booking_per_slot (live_slot_id);
+    ADD UNIQUE KEY uq_bookings_live_slot_id (live_slot_id);
 
 -- To remove it again:
---   ALTER TABLE bookings DROP INDEX uq_one_live_booking_per_slot, DROP COLUMN live_slot_id;
+--   ALTER TABLE bookings DROP INDEX uq_bookings_live_slot_id, DROP COLUMN live_slot_id;

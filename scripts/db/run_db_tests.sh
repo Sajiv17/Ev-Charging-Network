@@ -181,6 +181,21 @@ expect_error "deleting a station with bookings is blocked (cascade stops at book
     "START TRANSACTION; DELETE FROM stations WHERE station_id = 1; ROLLBACK;" \
     "foreign key constraint fails"
 
+expect_error "EER: a driver cannot operate a station (insert)" bangalore \
+    "START TRANSACTION;
+     INSERT INTO stations (station_name, city_id, address, operator_id) VALUES ('TEST bad op', 1, 'x', 5);
+     ROLLBACK;" \
+    "must be a user with role operator or admin"
+
+expect_error "EER: a station cannot be handed to a driver (update)" bangalore \
+    "START TRANSACTION; UPDATE stations SET operator_id = 5 WHERE station_id = 1; ROLLBACK;" \
+    "must be a user with role operator or admin"
+
+out=$(docker exec ev-mysql-bangalore mysql -uev_user -p"${MYSQL_PASSWORD:-evcharge_pass_2024}" -e "XA RECOVER" 2>&1 \
+      | grep -v "Using a password")
+echo "$out" | grep -q "ERROR" && fail "ev_user may run XA RECOVER (XA_RECOVER_ADMIN granted)" "$out" \
+    || pass "ev_user may run XA RECOVER (XA_RECOVER_ADMIN granted)"
+
 echo "== Stored procedures"
 
 # A fresh future slot on Koramangala CHG-01 (60 kW CCS2), booked by driver.bangalore (user 5,
@@ -331,6 +346,17 @@ SELECT 'repair: free future slots re-open, the started slot does not',
           AND (SELECT is_available FROM slots WHERE slot_id = @s_free) = 1
           AND (SELECT is_available FROM slots WHERE slot_id = @s_active) = 0, 'PASS', 'FAIL'), '';
 
+SELECT 'alert: fault notifies the station operator with counts and totals',
+       IF((SELECT COUNT(*) FROM operator_alerts
+            WHERE charger_id = @ch AND alert_type = 'charger_faulted' AND operator_id = 2
+              AND bookings_cancelled = 3 AND refunded_amount = @r_active + 400.00
+              AND queued_refund_amount = 500.00 AND acknowledged_at IS NULL) = 1, 'PASS', 'FAIL'),
+       (SELECT message FROM operator_alerts WHERE charger_id = @ch AND alert_type = 'charger_faulted');
+SELECT 'alert: repair notifies the operator with slots re-opened',
+       IF((SELECT slots_reopened FROM operator_alerts WHERE charger_id = @ch AND alert_type = 'charger_repaired') = 2,
+          'PASS', 'FAIL'),
+       (SELECT message FROM operator_alerts WHERE charger_id = @ch AND alert_type = 'charger_repaired');
+
 -- sp_process_refund: the queued remote refund is handed back to the coordinator.
 SET @r_remote = (SELECT r.refund_id FROM refunds r JOIN payments p ON p.payment_id = r.payment_id WHERE p.booking_id = @b_remote);
 CALL sp_process_refund(@r_remote);
@@ -380,7 +406,7 @@ scratch ev_guard_test -e "
     INSERT INTO bookings (user_id, slot_id, vehicle_id, booking_status, booking_amount) VALUES (1, 1, 1, 'cancelled', 100);
     INSERT INTO bookings (user_id, slot_id, vehicle_id, booking_status, booking_amount) VALUES (1, 1, 1, 'confirmed', 100);" > /dev/null
 out=$(scratch ev_guard_test -e "INSERT INTO bookings (user_id, slot_id, vehicle_id, booking_status, booking_amount) VALUES (2, 1, 2, 'confirmed', 100);")
-echo "$out" | grep -q "Duplicate entry '1' for key 'bookings.uq_one_live_booking_per_slot'" \
+echo "$out" | grep -q "Duplicate entry '1' for key 'bookings.uq_bookings_live_slot_id'" \
     && pass "optional guard rejects a second live booking on the same slot" \
     || fail "optional guard rejects a second live booking on the same slot" "${out:-inserted}"
 out=$(scratch ev_guard_test -e "
