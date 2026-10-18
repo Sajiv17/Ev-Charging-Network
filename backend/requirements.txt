@@ -13,6 +13,9 @@ pymongo==4.6.0
 # Authentication & Security
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
+# passlib 1.7.4 breaks with bcrypt >= 4.1 ("password cannot be longer than 72 bytes").
+# Pin bcrypt so password hashing works.
+bcrypt==4.0.1
 python-multipart==0.0.6
 
 # Utilities

@@ -9,6 +9,28 @@ class Settings(BaseSettings):
     DEBUG: bool = os.getenv("DEBUG", "false").lower() == "true"
     SECRET_KEY: str = os.getenv("SECRET_KEY", "your-secret-key-change-in-production")
 
+    # Auth (JWT)
+    JWT_ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "720"))
+
+    # Demo mode: enables /api/demo/* endpoints (unsafe booking, slot reset, audit log)
+    DEMO_MODE: bool = os.getenv("DEMO_MODE", "true").lower() == "true"
+
+    # Print every SQL statement the backend runs (noisy, useful for debugging)
+    SQL_ECHO: bool = os.getenv("SQL_ECHO", "false").lower() == "true"
+
+    # Two-phase commit coordinator
+    # Decision log (the coordinator's own write-ahead log). Kept under backend/var/,
+    # which is inside the ./backend bind mount, so it survives container restarts.
+    XA_LOG_PATH: str = os.getenv(
+        "XA_LOG_PATH", os.path.join(os.path.dirname(__file__), "..", "..", "var", "xa_coordinator.log")
+    )
+    # Seconds between background recovery passes (in-doubt XA + queued refunds). 0 = off.
+    RECOVERY_INTERVAL_S: int = int(os.getenv("RECOVERY_INTERVAL_S", "30"))
+
+    # All MySQL sessions use this time zone so NOW() and slot times agree (IST)
+    DB_TIME_ZONE: str = os.getenv("DB_TIME_ZONE", "+05:30")
+
     # MySQL Bangalore
     MYSQL_BANGALORE_HOST: str = os.getenv("MYSQL_BANGALORE_HOST", "localhost")
     MYSQL_BANGALORE_PORT: int = int(os.getenv("MYSQL_BANGALORE_PORT", "3306"))
