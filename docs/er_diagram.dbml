@@ -1,0 +1,232 @@
+// EV Charging Network - schema for https://dbdiagram.io (paste, then Export -> PNG)
+// Source of truth: database/mysql/schema/01_catalog.sql and 02_core.sql
+
+Project ev_charging_network {
+  database_type: 'MySQL'
+  Note: '''
+  Three MySQL 8.0 city nodes (Bangalore, Chennai, Delhi) with identical schemas.
+  REPLICATED tables hold the same rows and IDs on every node.
+  FRAGMENTED tables hold only that city's rows; their IDs repeat across nodes.
+  '''
+}
+
+TableGroup replicated {
+  cities
+  connector_types
+  pricing_plans
+  corridors
+  users
+  vehicles
+}
+
+TableGroup fragmented_by_city {
+  stations
+  charger_units
+  slots
+  bookings
+  payments
+  refunds
+  corridor_stations
+  operator_alerts
+}
+
+Table cities [note: 'REPLICATED'] {
+  city_id int [pk, increment]
+  city_name varchar(100) [not null, unique]
+  state varchar(100) [not null]
+  country varchar(100) [default: 'India']
+  created_at timestamp
+}
+
+Table connector_types [note: 'REPLICATED. Catalog that removes connector_type -> current_type from charger_units (BCNF)'] {
+  connector_type varchar(10) [pk, note: 'CCS2, CHAdeMO, Type2']
+  current_type enum('AC','DC') [not null]
+  description varchar(255) [not null]
+}
+
+Table pricing_plans [note: 'REPLICATED'] {
+  plan_id int [pk, increment]
+  city_id int [not null, ref: > cities.city_id]
+  charger_type enum('AC','DC') [not null]
+  rate_per_kwh decimal(6,2) [not null, note: 'CHECK > 0']
+  booking_fee decimal(6,2) [default: 0, note: 'CHECK >= 0']
+  effective_from date [not null]
+  effective_to date
+  created_at timestamp
+
+  indexes {
+    (city_id, charger_type, effective_from) [unique, name: 'uq_pricing_plans_city_id_charger_type_effective_from']
+  }
+}
+
+Table corridors [note: 'REPLICATED'] {
+  corridor_id int [pk, increment]
+  corridor_name varchar(150) [not null, unique]
+  highway varchar(50) [not null]
+  origin_city_id int [not null, ref: > cities.city_id]
+  destination varchar(100) [not null]
+  length_km decimal(6,1) [not null]
+}
+
+Table users [note: 'REPLICATED, same user_id on every node (Bangalore issues IDs). wallet_balance is authoritative only on home_city_id node.'] {
+  user_id int [pk, increment]
+  email varchar(255) [not null, unique]
+  password_hash varchar(255) [not null]
+  full_name varchar(255) [not null]
+  phone varchar(20)
+  role enum('driver','operator','admin') [default: 'driver']
+  wallet_balance decimal(10,2) [default: 0, note: 'CHECK >= 0']
+  home_city_id int [not null, default: 1, ref: > cities.city_id]
+  is_active boolean [default: true]
+  created_at timestamp
+  updated_at timestamp
+
+  indexes {
+    role [name: 'idx_users_role']
+    home_city_id [name: 'idx_users_home_city_id']
+  }
+}
+
+Table vehicles [note: 'REPLICATED, same vehicle_id on every node'] {
+  vehicle_id int [pk, increment]
+  user_id int [not null, ref: > users.user_id]
+  make varchar(100) [not null]
+  model varchar(100) [not null]
+  battery_capacity_kwh decimal(5,2) [not null, note: 'CHECK > 0']
+  connector_type varchar(10) [not null, ref: > connector_types.connector_type]
+  registration_number varchar(20) [unique]
+  created_at timestamp
+}
+
+Table stations [note: 'FRAGMENTED by city_id'] {
+  station_id int [pk, increment]
+  station_name varchar(255) [not null]
+  city_id int [not null, ref: > cities.city_id]
+  address text [not null]
+  latitude decimal(10,8) [note: 'CHECK -90..90']
+  longitude decimal(11,8) [note: 'CHECK -180..180']
+  operator_id int [not null, ref: > users.user_id]
+  is_operational boolean [default: true]
+  created_at timestamp
+  updated_at timestamp
+
+  indexes {
+    (city_id, is_operational) [name: 'idx_stations_city_id_is_operational']
+    operator_id [name: 'idx_stations_operator_id']
+    (latitude, longitude) [name: 'idx_stations_latitude_longitude']
+  }
+}
+
+Table charger_units [note: 'FRAGMENTED'] {
+  charger_id int [pk, increment]
+  station_id int [not null, ref: > stations.station_id]
+  charger_code varchar(50) [not null]
+  charger_type enum('AC','DC') [not null, note: 'Denormalized copy of connector_types.current_type, enforced by trigger']
+  max_power_kw decimal(5,2) [not null, note: 'CHECK > 0']
+  connector_type varchar(10) [not null, ref: > connector_types.connector_type]
+  status enum('available','occupied','faulted','maintenance') [default: 'available']
+  created_at timestamp
+  updated_at timestamp
+
+  indexes {
+    (station_id, charger_code) [unique, name: 'uq_charger_units_station_id_charger_code']
+    status [name: 'idx_charger_units_status']
+    connector_type [name: 'idx_charger_units_connector_type']
+  }
+}
+
+Table slots [note: 'FRAGMENTED. No overlapping slots per charger and date (trigger).'] {
+  slot_id int [pk, increment]
+  charger_id int [not null, ref: > charger_units.charger_id]
+  slot_date date [not null]
+  slot_start_time time [not null]
+  slot_end_time time [not null, note: 'CHECK > slot_start_time']
+  is_available boolean [default: true, note: 'Controlled redundancy: no live booking; 2PL lock target']
+  created_at timestamp
+
+  indexes {
+    (charger_id, slot_date, slot_start_time) [unique, name: 'uq_slots_charger_id_slot_date_slot_start_time']
+  }
+}
+
+Table bookings [note: 'FRAGMENTED. All FKs ON DELETE RESTRICT.'] {
+  booking_id int [pk, increment]
+  user_id int [not null, ref: > users.user_id]
+  slot_id int [not null, ref: > slots.slot_id]
+  vehicle_id int [not null, ref: > vehicles.vehicle_id]
+  booking_status enum('confirmed','active','completed','cancelled') [default: 'confirmed']
+  booking_amount decimal(10,2) [not null, note: 'Prepaid estimate; CHECK > 0']
+  energy_consumed_kwh decimal(8,2) [note: 'CHECK >= 0']
+  session_start_time datetime
+  session_end_time datetime [note: 'CHECK >= session_start_time']
+  created_at timestamp
+  updated_at timestamp
+
+  indexes {
+    slot_id [name: 'idx_bookings_slot_id']
+    booking_status [name: 'idx_bookings_booking_status']
+    (session_start_time, session_end_time) [name: 'idx_bookings_session_start_time_session_end_time']
+    (user_id, booking_status) [name: 'idx_bookings_user_id_booking_status']
+  }
+}
+
+Table payments [note: 'FRAGMENTED, stored next to the booking'] {
+  payment_id int [pk, increment]
+  booking_id int [not null, ref: > bookings.booking_id]
+  amount decimal(10,2) [not null, note: 'CHECK > 0']
+  payment_method enum('wallet','upi','card','netbanking') [not null]
+  payment_status enum('pending','completed','failed','refunded') [default: 'pending']
+  transaction_id varchar(255) [unique]
+  payment_timestamp timestamp
+
+  indexes {
+    booking_id [name: 'idx_payments_booking_id']
+    payment_status [name: 'idx_payments_payment_status']
+  }
+}
+
+Table refunds [note: 'FRAGMENTED. queued = owed to a wallet on another node'] {
+  refund_id int [pk, increment]
+  payment_id int [not null, ref: > payments.payment_id]
+  refund_amount decimal(10,2) [not null, note: 'CHECK > 0']
+  refund_reason text
+  refund_status enum('queued','processing','completed','failed') [default: 'queued']
+  created_at timestamp
+  processed_at timestamp
+
+  indexes {
+    payment_id [name: 'idx_refunds_payment_id']
+    refund_status [name: 'idx_refunds_refund_status']
+  }
+}
+
+Table corridor_stations [note: 'FRAGMENTED: each node lists its own stations on a corridor'] {
+  corridor_id int [not null, ref: > corridors.corridor_id]
+  station_id int [not null, ref: > stations.station_id]
+  km_marker decimal(6,1) [not null, note: 'km from corridor origin']
+
+  indexes {
+    (corridor_id, station_id) [pk]
+    (corridor_id, km_marker) [name: 'idx_corridor_stations_corridor_id_km_marker']
+    station_id [name: 'idx_corridor_stations_station_id']
+  }
+}
+
+Table operator_alerts [note: 'FRAGMENTED. Written by after_charger_fault: the "operator alerted" step'] {
+  alert_id int [pk, increment]
+  charger_id int [not null, ref: > charger_units.charger_id]
+  operator_id int [not null, ref: > users.user_id, note: 'Recipient when raised (historical, not derived)']
+  alert_type enum('charger_faulted','charger_repaired') [not null]
+  bookings_cancelled int [not null, default: 0]
+  refunded_amount decimal(10,2) [not null, default: 0, note: 'Credited on this node']
+  queued_refund_amount decimal(10,2) [not null, default: 0, note: 'Owed by other nodes']
+  slots_reopened int [not null, default: 0]
+  message varchar(255) [not null]
+  created_at timestamp
+  acknowledged_at timestamp [note: 'NULL = unread']
+
+  indexes {
+    (operator_id, acknowledged_at) [name: 'idx_operator_alerts_operator_id_acknowledged_at']
+    charger_id [name: 'idx_operator_alerts_charger_id']
+  }
+}

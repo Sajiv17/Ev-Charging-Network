@@ -1,0 +1,50 @@
+// EER: specialization of USER (rendered by render_diagrams.mjs to docs/images/eer_users.png)
+// Notation (Elmasri & Navathe): circle "d" = disjoint specialization, double line = total
+// participation of the superclass, the "U"-shaped mark on each subclass line points to the subclass.
+digraph eer {
+  graph [rankdir=TB, nodesep=0.5, ranksep=0.55, fontname="Arial", bgcolor="white",
+         label=<<b>EER: USER specialization (disjoint, total) and the relationships of each subclass</b><br/><font point-size="11">Mapped to ONE table (users) with the discriminator role; OPERATES is restricted to OPERATOR/ADMIN by trigger</font>>,
+         labelloc=t, fontsize=16];
+  node [fontname="Arial", fontsize=12];
+  edge [fontname="Arial", fontsize=10, arrowhead=none];
+
+  USER [shape=box, style="filled", fillcolor="#D6E6F7",
+        label=<<b>USER</b><br/><font point-size="10"><u>user_id</u>, email, full_name, phone,<br/>password_hash, wallet_balance, home_city_id, is_active<br/>defining attribute: role</font>>];
+  d [shape=circle, width=0.45, fixedsize=true, label="d"];
+  DRIVER [shape=box, style=filled, fillcolor="#F4F4F4", label=<<b>DRIVER</b><br/><font point-size="10">role = 'driver'</font>>];
+  OPERATOR [shape=box, style=filled, fillcolor="#F4F4F4", label=<<b>OPERATOR</b><br/><font point-size="10">role = 'operator'</font>>];
+  ADMIN [shape=box, style=filled, fillcolor="#F4F4F4", label=<<b>ADMIN</b><br/><font point-size="10">role = 'admin'</font>>];
+
+  USER -> d [color="black:white:black", penwidth=1.2, label=" total  "];
+  d -> DRIVER [label=" ⊂ "];
+  d -> OPERATOR [label=" ⊂ "];
+  d -> ADMIN [label=" ⊂ "];
+
+  // Relationships (Chen diamonds). Cardinality labels are on the entity side.
+  OWNS [shape=diamond, style=filled, fillcolor="#FFF4D6", label="OWNS"];
+  MAKES [shape=diamond, style=filled, fillcolor="#FFF4D6", label="MAKES"];
+  OPERATES [shape=diamond, style=filled, fillcolor="#FFF4D6", label="OPERATES"];
+  RECEIVES [shape=diamond, style=filled, fillcolor="#FFF4D6", label="RECEIVES"];
+  VEHICLE [shape=box, label=<<b>VEHICLE</b>>];
+  BOOKING [shape=box, label=<<b>BOOKING</b>>];
+  STATION [shape=box, label=<<b>STATION</b>>];
+  ALERT [shape=box, label=<<b>OPERATOR_ALERT</b>>];
+
+  // Any user may own a car and book (staff charge too), so these hang off the superclass.
+  USER -> OWNS [label=" 1 "];
+  OWNS -> VEHICLE [label=" N ", color="black:white:black"];
+  USER -> MAKES [label=" 1 "];
+  MAKES -> BOOKING [label=" N ", color="black:white:black"];
+
+  // Subclass-specific relationships.
+  OPERATOR -> OPERATES [label=" 1 "];
+  ADMIN -> OPERATES [label=" (may also) ", style=dashed];
+  OPERATES -> STATION [label=" N ", color="black:white:black"];
+  OPERATOR -> RECEIVES [label=" 1 "];
+  RECEIVES -> ALERT [label=" N ", color="black:white:black"];
+
+  { rank=same; DRIVER; OPERATOR; ADMIN; }
+  { rank=same; OWNS; MAKES; }
+
+  legend [shape=note, fontsize=9, label="Double line = total participation\l(every VEHICLE has an owner, every STATION an operator,\l every BOOKING a user, every ALERT a recipient).\lSubclasses add no attributes, so single-table mapping\l(users.role) avoids three 1:1 joins; the rule the FK alone\lcannot express (OPERATES only for OPERATOR/ADMIN) is\lenforced by trg_stations_operator_role_before_insert/update.\l"];
+}
