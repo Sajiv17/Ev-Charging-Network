@@ -1,35 +1,36 @@
 import React from 'react';
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import './App.css';
+import './styles/ui.css';
+
+import Header from './components/Header';
+import Home from './pages/Home';
+import StationSearch from './pages/SearchStation'; // file is SearchStation.js
+import StationDetail from './pages/StationDetail';
+import BookingFlow from './pages/BookingFlow';
+import MyBookings from './pages/MyBookings';
+import Dashboard from './pages/Dashboard';
+import AdminPanel from './pages/AdminPanel';
 
 function App() {
   return (
-    <div className="App">
-      <header className="App-header">
-        <h1>⚡ EV Charging Network</h1>
-        <p>Multi-city EV charging slot booking platform</p>
-        <div className="status-cards">
-          <div className="status-card">
-            <h3>Frontend</h3>
-            <span className="status-badge running">Running</span>
-          </div>
-          <div className="status-card">
-            <h3>Backend API</h3>
-            <span className="status-badge">Check localhost:8000</span>
-          </div>
-          <div className="status-card">
-            <h3>MySQL Nodes</h3>
-            <span className="status-badge">3 cities</span>
-          </div>
-          <div className="status-card">
-            <h3>MongoDB</h3>
-            <span className="status-badge">Real-time data</span>
-          </div>
-        </div>
-        <p className="info">
-          Ready for development. Team members can start building their components.
-        </p>
-      </header>
-    </div>
+    // The Router is the OUTERMOST element. Header uses <NavLink>, so it must
+    // live INSIDE it. Header outside the Router = white page + "basename" error.
+    <BrowserRouter>
+      <Header />
+      <main className="container">
+        <Routes>
+          <Route path="/" element={<Home />} />
+          <Route path="/search" element={<StationSearch />} />
+          <Route path="/stations/:city/:stationId" element={<StationDetail />} />
+          <Route path="/book/:city/:stationId" element={<BookingFlow />} />
+          <Route path="/my-bookings" element={<MyBookings />} />
+          <Route path="/dashboard" element={<Dashboard />} />
+          <Route path="/admin" element={<AdminPanel />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </main>
+    </BrowserRouter>
   );
 }
 
