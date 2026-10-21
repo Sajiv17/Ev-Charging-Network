@@ -7,19 +7,49 @@
 
 ## 🚀 Quick Start
 
+### Automated Testing (Recommended)
+
 ```bash
 # Clone the repo
-git clone https://github.com/YOUR_USERNAME/ev-charging-network.git
-cd ev-charging-network
+git clone https://github.com/Sajiv17/Ev-Charging-Network.git
+cd Ev-Charging-Network
 
-# Start all services (MySQL nodes, MongoDB, Backend, Frontend)
-docker-compose up --build
-
-# Access the application
-# Frontend: http://localhost:3000
-# Backend API: http://localhost:8000
-# API Docs: http://localhost:8000/docs
+# Run automated test setup
+./scripts/test-project.sh
 ```
+
+This script will:
+- ✅ Start all Docker containers (MySQL × 3, MongoDB, Backend)
+- ✅ Seed MongoDB with sample data
+- ✅ Start real-time simulator
+- ✅ Verify everything is working
+
+Then start the frontend:
+```bash
+cd frontend
+npm install
+npm start
+```
+
+Open http://localhost:3000 → Go to Dashboard → Watch live updates! 🎉
+
+### Manual Setup
+
+```bash
+# Start all services
+docker-compose up -d
+
+# Seed MongoDB
+docker exec ev-backend python backend/scripts/seed_mongodb.py
+
+# Start simulator
+docker exec -d ev-backend python backend/scripts/simulate_realtime_status.py
+
+# Start frontend (in another terminal)
+cd frontend && npm install && npm start
+```
+
+**📚 Complete Testing Guide:** See [TESTING_QUICK_START.md](TESTING_QUICK_START.md)
 
 ---
 
