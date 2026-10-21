@@ -10,6 +10,17 @@ MongoDB 6.0 real-time data storage for the EV Charging Network.
 
 ---
 
+## 📚 Complete Documentation
+
+**For comprehensive guides, see:**
+- **[DISTRIBUTED.md](../../docs/DISTRIBUTED.md)** — Distributed architecture: 3 MySQL city nodes, horizontal fragmentation, CAP theorem, XA transactions
+- **[TESTING_E2E.md](../../docs/TESTING_E2E.md)** — End-to-end testing: distributed setup verification, failure scenarios, performance benchmarks
+- **[README_SIMULATOR.md](../../backend/scripts/README_SIMULATOR.md)** — Real-time status simulator: how it works, running it, troubleshooting
+
+This README covers MongoDB setup only. For the big picture, start with DISTRIBUTED.md.
+
+---
+
 ## Folder Layout
 
 ```
